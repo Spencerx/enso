@@ -63,6 +63,7 @@
 - [Added Table.Offset][12071]
 - [Implemented Generic JDBC connections.][12073]
 - [Added Column.Offset][12092]
+- [Progress API][12163]
 - [When reading a Delimited file, if a row with more columns than expected is
   encountered, extra columns can be added to the result.][12231]
   - In `Delimited` format, the `keep_invalid_rows` setting has been renamed to
@@ -82,6 +83,7 @@
 [12071]: https://github.com/enso-org/enso/pull/12071
 [12073]: https://github.com/enso-org/enso/pull/12073
 [12092]: https://github.com/enso-org/enso/pull/12092
+[12163]: https://github.com/enso-org/enso/pull/12163
 [12231]: https://github.com/enso-org/enso/pull/12231
 [12206]: https://github.com/enso-org/enso/pull/12206
 [12251]: https://github.com/enso-org/enso/pull/12251

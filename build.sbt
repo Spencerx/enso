@@ -1121,7 +1121,8 @@ lazy val `logging-service-logback` = project
     Compile / shouldCompileModuleInfoManually := true,
     Compile / internalModuleDependencies := Seq(
       (`logging-service` / Compile / exportedModule).value,
-      (`logging-config` / Compile / exportedModule).value
+      (`logging-config` / Compile / exportedModule).value,
+      (`logging-utils` / Compile / exportedModule).value
     ),
     Test / shouldCompileModuleInfoManually := true,
     Test / javaModuleName := "org.enso.logging.service.logback.test.provider",
@@ -3062,6 +3063,7 @@ lazy val `runtime-integration-tests` =
     .dependsOn(`runtime`)
     .dependsOn(`runtime-test-instruments`)
     .dependsOn(`logging-service-logback` % "test->test")
+    .dependsOn(`logging-utils` % Test)
     .dependsOn(testkit % Test)
     .dependsOn(`connected-lock-manager-server`)
     .dependsOn(`test-utils`)
@@ -4557,9 +4559,9 @@ lazy val `library-manager-test` = project
   )
   .dependsOn(`library-manager`)
   .dependsOn(`process-utils`)
-  .dependsOn(`logging-utils` % "test->test")
+  .dependsOn(`logging-utils`)
   .dependsOn(testkit)
-  .dependsOn(`logging-service-logback` % "test->test")
+  .dependsOn(`logging-service-logback` % Test)
 
 lazy val `connected-lock-manager` = project
   .in(file("lib/scala/connected-lock-manager"))
