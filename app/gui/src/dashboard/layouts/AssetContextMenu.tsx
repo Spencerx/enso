@@ -336,7 +336,8 @@ export default function AssetContextMenu(props: AssetContextMenuProps) {
           !isOtherUserUsingProject &&
           (!isCloud ||
             asset.type === backendModule.AssetType.project ||
-            asset.type === backendModule.AssetType.directory) && (
+            asset.type === backendModule.AssetType.directory ||
+            asset.type === backendModule.AssetType.secret) && (
             <ContextMenuEntry
               hidden={hidden}
               action="rename"
@@ -373,21 +374,6 @@ export default function AssetContextMenu(props: AssetContextMenuProps) {
               }}
             />
           )}
-        {isCloud && (
-          <ContextMenuEntry
-            hidden={hidden}
-            action="editDescription"
-            label={getText('editDescriptionShortcut')}
-            doAction={() => {
-              setIsAssetPanelTemporarilyVisible(true)
-              setAssetPanelProps({
-                backend,
-                item: asset,
-                spotlightOn: 'description',
-              })
-            }}
-          />
-        )}
         {isCloud && (
           <ContextMenuEntry
             hidden={hidden}
