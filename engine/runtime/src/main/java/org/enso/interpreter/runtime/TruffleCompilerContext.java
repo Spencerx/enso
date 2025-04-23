@@ -163,24 +163,10 @@ final class TruffleCompilerContext implements CompilerContext {
   }
 
   // module related
-  @Override
-  public QualifiedName getModuleName(CompilerContext.Module module) {
-    return module.getName();
-  }
-
-  @Override
-  public CharSequence getCharacters(CompilerContext.Module module) throws IOException {
-    return module.getCharacters();
-  }
 
   @Override
   public IdMap getIdMap(CompilerContext.Module module) {
     return module.getIdMap();
-  }
-
-  @Override
-  public boolean isSynthetic(CompilerContext.Module module) {
-    return module.isSynthetic();
   }
 
   @Override
@@ -198,16 +184,6 @@ final class TruffleCompilerContext implements CompilerContext {
   @Override
   public boolean wasLoadedFromCache(CompilerContext.Module module) {
     return ((Module) module).unsafeModule().wasLoadedFromCache();
-  }
-
-  @Override
-  public org.enso.compiler.core.ir.Module getIr(CompilerContext.Module module) {
-    return module.getIr();
-  }
-
-  @Override
-  public CompilationStage getCompilationStage(CompilerContext.Module module) {
-    return module.getCompilationStage();
   }
 
   final TypeGraph getTypeHierarchy() {
