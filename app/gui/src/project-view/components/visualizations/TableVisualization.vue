@@ -143,6 +143,7 @@ const rowLimit = ref(0)
 const page = ref(0)
 const pageLimit = ref(0)
 const rowCount = ref(0)
+const filteredRowCount = ref(null)
 const showRowCount = ref(true)
 const isTruncated = ref(false)
 const isCreateNodeEnabled = ref(false)
@@ -207,6 +208,7 @@ const statusBar = computed(() =>
               statusPanel: TableVizStatusBar,
               statusPanelParams: {
                 total: allRowCount.value,
+                filtered: isSSRM.value ? filteredRowCount.value : null,
               },
             },
           ]
@@ -366,8 +368,8 @@ function createServer() {
       )
 
       const response = await config.executeExpression(expressionFunction)
-
       if (response.ok) {
+        filteredRowCount.value = response.value.row_count
         return {
           success: true,
           data: response.value.rows,
