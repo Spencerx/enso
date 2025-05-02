@@ -664,6 +664,7 @@ val googleProtobufVersion   = "3.25.1"
 val shapelessVersion        = "2.3.10"
 val postgresVersion         = "42.4.0"
 val h2Version               = "2.3.232"
+val jimFsVersion            = "1.3.0"
 
 // ============================================================================
 // === Utility methods =====================================================
@@ -3398,9 +3399,9 @@ lazy val `runtime-compiler` =
       scalaModuleDependencySetting,
       mixedJavaScalaProjectSetting,
       annotationProcSetting,
+      inConfig(Test)(truffleRunOptionsSettings),
       commands += WithDebugCommand.withDebug,
       javaModuleName := "org.enso.runtime.compiler",
-      (Test / fork) := true,
       libraryDependencies ++= Seq(
         "junit"                % "junit"                   % junitVersion              % Test,
         "com.github.sbt"       % "junit-interface"         % junitIfVersion            % Test,
@@ -3409,8 +3410,12 @@ lazy val `runtime-compiler` =
         "org.yaml"             % "snakeyaml"               % snakeyamlVersion          % Test,
         "com.typesafe"         % "config"                  % typesafeConfigVersion     % Test,
         "org.graalvm.polyglot" % "polyglot"                % graalMavenPackagesVersion % Test,
-        "org.hamcrest"         % "hamcrest-all"            % hamcrestVersion           % Test
+        "org.hamcrest"         % "hamcrest-all"            % hamcrestVersion           % Test,
+        "com.google.jimfs"     % "jimfs"                   % jimFsVersion              % Test
       ),
+      libraryDependencies ++= {
+        logbackPkg.map(_ % Test) ++ ioSentry.map(_ % Test)
+      },
       Compile / moduleDependencies ++= Seq(
         "org.slf4j"        % "slf4j-api"               % slf4jVersion,
         "org.netbeans.api" % "org-openide-util-lookup" % netbeansApiVersion
@@ -3425,8 +3430,10 @@ lazy val `runtime-compiler` =
         (`persistance` / Compile / exportedModule).value,
         (`editions` / Compile / exportedModule).value
       ),
-      Test / moduleDependencies := {
-        (Compile / moduleDependencies).value ++ scalaLibrary ++ scalaReflect ++ Seq(
+      Test / fork := true,
+      Test / javaOptions ++= testLogProviderOptions,
+      Test / moduleDependencies ++= {
+        (Compile / moduleDependencies).value ++ scalaLibrary ++ scalaReflect ++ logbackPkg ++ ioSentry ++ Seq(
           "org.apache.commons"   % "commons-compress" % commonsCompressVersion,
           "org.yaml"             % "snakeyaml"        % snakeyamlVersion,
           "com.typesafe"         % "config"           % typesafeConfigVersion,
@@ -3437,10 +3444,14 @@ lazy val `runtime-compiler` =
         val compileDeps = (Compile / internalModuleDependencies).value
         compileDeps ++ Seq(
           (Compile / exportedModule).value,
+          (`runtime-compiler-dump-igv` / Compile / exportedModule).value,
           (`scala-libs-wrapper` / Compile / exportedModule).value,
           (`version-output` / Compile / exportedModule).value,
           (`scala-yaml` / Compile / exportedModule).value,
           (`logging-config` / Compile / exportedModule).value,
+          (`logging-service` / Compile / exportedModule).value,
+          (`logging-service-logback` / Compile / exportedModule).value,
+          (`logging-service-logback` / Test / exportedModule).value,
           (`logging-utils` / Compile / exportedModule).value,
           (`semver` / Compile / exportedModule).value
         )
@@ -3462,13 +3473,20 @@ lazy val `runtime-compiler` =
         )
       },
       Test / addExports := {
-        val modName  = javaModuleName.value
+        // Add necessary exports for IR module dumping to IGV
+        // Which is used in the test utils
+        val irDumperExports = Map(
+          "jdk.graal.compiler/jdk.graal.compiler.graphio" -> Seq(
+            (`runtime-compiler-dump-igv` / javaModuleName).value
+          )
+        )
+
         val testPkgs = (Test / packages).value
         val testPkgsExports = testPkgs.map { pkg =>
-          modName + "/" + pkg -> Seq("ALL-UNNAMED")
+          (javaModuleName.value) + "/" + pkg -> Seq("ALL-UNNAMED")
         }.toMap
 
-        testPkgsExports
+        testPkgsExports ++ irDumperExports
       },
       Test / addReads := {
         Map(javaModuleName.value -> Seq("ALL-UNNAMED"))
@@ -3480,6 +3498,9 @@ lazy val `runtime-compiler` =
     .dependsOn(`engine-common`)
     .dependsOn(editions)
     .dependsOn(`persistance-dsl` % "provided")
+    .dependsOn(`runtime-compiler-dump-igv` % "test->compile")
+    .dependsOn(`logging-service-logback` % "test->test")
+    .dependsOn(`logging-service` % "test->compile")
 
 /** This project contains only a single service (interface) definition.
   */
@@ -3509,11 +3530,10 @@ lazy val `runtime-compiler-dump-igv` =
       scalaModuleDependencySetting,
       javaModuleName := "org.enso.runtime.compiler.dump.igv",
       Compile / internalModuleDependencies := {
-        val transitiveDeps =
-          (`runtime-compiler` / Compile / internalModuleDependencies).value
         Seq(
-          (`runtime-compiler` / Compile / exportedModule).value
-        ) ++ transitiveDeps
+          (`runtime-parser` / Compile / exportedModule).value,
+          (`runtime-compiler-dump` / Compile / exportedModule).value
+        )
       },
       Compile / moduleDependencies ++= Seq(
         "org.slf4j" % "slf4j-api" % slf4jVersion
@@ -3527,7 +3547,6 @@ lazy val `runtime-compiler-dump-igv` =
       }
     )
     .dependsOn(`runtime-compiler-dump`)
-    .dependsOn(`runtime-compiler`)
 
 lazy val `runtime-suggestions` =
   (project in file("engine/runtime-suggestions"))
