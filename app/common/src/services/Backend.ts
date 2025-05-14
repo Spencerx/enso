@@ -231,7 +231,7 @@ export interface User extends UserInfo {
   readonly isEnsoTeamMember: boolean
 }
 
-/** A user related to the current user. */
+/** A user group related to the current user. */
 export interface UserGroup {
   readonly id: UserGroupId
   readonly name: string
@@ -651,7 +651,7 @@ export interface UserPermission {
 
 /** User permission for a specific user group. */
 export interface UserGroupPermission {
-  readonly userGroup: UserGroup
+  readonly userGroup: UserGroupInfo
   readonly permission: permissions.PermissionAction
 }
 
@@ -707,7 +707,7 @@ export function isUserGroupPermissionAnd(predicate: (permission: UserGroupPermis
 
 /** Get the property representing the name on an arbitrary variant of {@link UserPermission}. */
 export function getAssetPermissionName(permission: AssetPermission) {
-  return isUserPermission(permission) ? permission.user.name : permission.userGroup.name
+  return isUserPermission(permission) ? permission.user.name : permission.userGroup.groupName
 }
 
 /** Get the property representing the id on an arbitrary variant of {@link UserPermission}. */
@@ -849,6 +849,8 @@ export const COLORS = [
   // Dark blueish grey
   { lightness: 22, chroma: 13, hue: 252 },
 ] as const satisfies LChColor[]
+
+export const FALLBACK_COLOR = COLORS[0]
 
 /** Converts a {@link LChColor} to a CSS color string. */
 export function lChColorToCssColor(color: LChColor): string {
