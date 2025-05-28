@@ -952,7 +952,28 @@ lazy val `syntax-rust-definition` = project
     Compile / sourceGenerators += generateParserJavaSources,
     Compile / resourceGenerators += generateRustParserLib,
     Compile / javaSource := baseDirectory.value / "generate-java" / "java",
-    Compile / compile / javacOptions ++= Seq("-source", "11", "-target", "11")
+    Compile / compile / javacOptions ++= Seq("-source", "11", "-target", "11"),
+    // Make sure the native library is not packaged in the exported `jar`.
+    assembly / assemblyMergeStrategy := {
+      case PathList(file)
+          if file.endsWith(".so") || file.endsWith(".dll") || file
+            .endsWith(".dylib") =>
+        MergeStrategy.discard
+      case _ =>
+        MergeStrategy.first
+    },
+    assembly / assemblyExcludedJars := {
+      JPMSUtils.filterModulesFromClasspath(
+        (Compile / fullClasspath).value,
+        slf4jApi,
+        streams.value.log,
+        javaModuleName.value,
+        scalaBinaryVersion.value,
+        shouldContainAll = true
+      )
+    },
+    Compile / exportedModule := assembly.value,
+    Compile / exportedModuleBin := assembly.value
   )
 
 lazy val `scala-yaml` = (project in file("lib/scala/yaml"))
