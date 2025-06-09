@@ -3,22 +3,21 @@
  * wrapper, along with some convenience callbacks to make URL redirects for the authentication flows
  * work with Electron.
  */
-import * as React from 'react'
 
 import * as amplify from '@aws-amplify/auth'
 
 import * as common from 'enso-common'
 import * as detect from 'enso-common/src/detect'
 
-import * as appUtils from '#/appUtils'
+import * as appUtils from '$/appUtils'
 
-import { useLogger, type Logger } from '#/providers/LoggerProvider'
+import { type Logger } from '#/providers/LoggerProvider'
 
 import type * as saveAccessTokenModule from 'enso-common/src/accessToken'
 
-import * as cognitoModule from '#/authentication/cognito'
-import * as listen from '#/authentication/listen'
-import { useRouter } from '$/providers/react'
+import * as cognitoModule from '$/authentication/cognito'
+import * as listen from '$/authentication/listen'
+import { useRouter } from 'vue-router'
 
 /**
  * Configuration for the AWS Amplify library.
@@ -117,20 +116,16 @@ export interface AuthService {
  */
 export function useInitAuthService(authConfig: AuthConfig): AuthService {
   const { supportsDeepLinks } = authConfig
+  const router = useRouter()
 
-  const logger = useLogger()
-  const { router } = useRouter()
+  const amplifyConfig = loadAmplifyConfig(
+    console,
+    supportsDeepLinks,
+    (url) => void router.push(url),
+  )
+  const cognito = new cognitoModule.Cognito(console, supportsDeepLinks, amplifyConfig)
 
-  return React.useMemo(() => {
-    const amplifyConfig = loadAmplifyConfig(
-      logger,
-      supportsDeepLinks,
-      (url) => void router.push(url),
-    )
-    const cognito = new cognitoModule.Cognito(logger, supportsDeepLinks, amplifyConfig)
-
-    return { cognito, registerAuthEventListener: listen.registerAuthEventListener }
-  }, [logger, router, supportsDeepLinks])
+  return { cognito, registerAuthEventListener: listen.registerAuthEventListener }
 }
 
 /** Return the appropriate Amplify configuration for the current platform. */
@@ -248,12 +243,10 @@ function setDeepLinkHandler(logger: Logger, navigate: (url: string) => void) {
             // work with a custom URL protocol in Electron.
             // `history.replaceState` is only being saved here to be restored later.
             // It will never be called without a bound `this`.
-            // eslint-disable-next-line @typescript-eslint/unbound-method
             const replaceState = history.replaceState
             history.replaceState = () => false
             try {
               // @ts-expect-error `_handleAuthResponse` is a private method without typings.
-              // eslint-disable-next-line @typescript-eslint/no-unsafe-call
               await amplify.Auth._handleAuthResponse(url.toString())
 
               navigate(appUtils.DASHBOARD_PATH)

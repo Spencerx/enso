@@ -42,7 +42,7 @@ import type * as loggerProvider from '#/providers/LoggerProvider'
 import type * as saveAccessToken from 'enso-common/src/accessToken'
 import * as dateTime from 'enso-common/src/utilities/data/dateTime'
 
-import * as service from '#/authentication/service'
+import * as service from '$/authentication/service'
 
 /**
  * String used to identify the GitHub federated identity provider in AWS Amplify.
@@ -55,7 +55,6 @@ const GITHUB_PROVIDER = 'Github'
 const SEC_MS = 1_000
 
 // The names come from a third-party API and cannot be changed.
-/* eslint-disable @typescript-eslint/naming-convention */
 /** Attributes returned from {@link amplify.Auth.currentUserInfo}. */
 interface UserAttributes {
   readonly email: string
@@ -64,7 +63,6 @@ interface UserAttributes {
   readonly 'custom:fromDesktop'?: string
   readonly 'custom:organizationId'?: string
 }
-/* eslint-enable @typescript-eslint/naming-convention */
 
 /** The type of multi-factor authentication (MFA) including non-specified MFA */
 export type MfaType = MfaProtectionTypes | 'NOMFA' | 'TOTP'
@@ -288,7 +286,6 @@ export class Cognito implements ISessionProvider {
    */
   async organizationId() {
     // This `any` comes from a third-party API and cannot be avoided.
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const userInfo: UserInfo = await amplify.Auth.currentUserInfo()
     return userInfo.attributes['custom:organizationId'] ?? null
   }
@@ -296,7 +293,6 @@ export class Cognito implements ISessionProvider {
   /** Gets user email from cognito */
   async email() {
     // This `any` comes from a third-party API and cannot be avoided.
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const userInfo: UserInfo = await amplify.Auth.currentUserInfo()
     return userInfo.attributes.email
   }
@@ -366,13 +362,11 @@ export class Cognito implements ISessionProvider {
   async signInWithPassword(username: string, password: string) {
     const result = await results.Result.wrapAsync(async () => {
       // This `any` comes from a third-party API and cannot be avoided.
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const maybeUser = await amplify.Auth.signIn(username, password)
 
       if (maybeUser instanceof cognito.CognitoUser) {
         return maybeUser
       } else {
-        // eslint-disable-next-line no-restricted-properties
         console.error(
           'Unknown result from signIn, expected CognitoUser, got ' + typeof maybeUser,
           JSON.stringify(maybeUser),
@@ -539,7 +533,6 @@ export class Cognito implements ISessionProvider {
     if (cognitoUserResult.ok) {
       const cognitoUser = cognitoUserResult.unwrap()
       const result = await results.Result.wrapAsync(async () => {
-        // eslint-disable-next-line no-restricted-syntax
         return (await amplify.Auth.getPreferredMFA(cognitoUser)) as MfaType
       })
       return result.mapErr(intoAmplifyErrorOrThrow)
@@ -712,9 +705,7 @@ function intoSignUpParams(
        * It is necessary to disable the naming convention rule here, because the key is
        * expected to appear exactly as-is in Cognito, so we must match it.
        */
-      // eslint-disable-next-line @typescript-eslint/naming-convention
       ...(supportsDeepLinks ? { 'custom:fromDesktop': JSON.stringify(true) } : {}),
-      // eslint-disable-next-line @typescript-eslint/naming-convention
       ...(organizationId != null ? { 'custom:organizationId': organizationId } : {}),
     },
   }
@@ -918,7 +909,6 @@ async function currentAuthenticatedUser() {
      * Therefore, it is necessary to use `as` to narrow down the type to
      * `Promise<CognitoUser>`.
      */
-    // eslint-disable-next-line no-restricted-syntax
     () => amplify.Auth.currentAuthenticatedUser() as Promise<amplify.CognitoUser>,
   )
   return result.mapErr(intoAmplifyErrorOrThrow)
