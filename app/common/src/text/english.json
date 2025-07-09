@@ -1233,5 +1233,6 @@
   "manageLabelsModal.nextColor": "Next color",
   "manageLabelsModal.chooseColor": "Choose a color",
   "manageLabelsModal.labelAlreadyExists": "Label already exists",
-  "manageLabelsModal.selectedLabels": "Selected labels"
+  "manageLabelsModal.selectedLabels": "Selected labels",
+  "commercialUseNotice": "$0 - Not for commercial use"
 }
