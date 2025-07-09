@@ -3640,11 +3640,14 @@ lazy val `engine-runner` = project
           sys.env.get("CI").isDefined && Platform.isMacOS && Platform.isArm64
         val maxLimit           = if (macArmOnCI) Some(14336) else Some(15608)
         val areStdlibsIncluded = !GraalVM.EnsoLauncher.fast
+        val azureFeature =
+          "org.enso.microsoft.nativeimage.AzureNativeImageFeature"
         val databaseFeature =
           "org.enso.database.nativeimage.SqliteJdbcPatchedFeature"
         val features = Seq(
           "org.enso.interpreter.runtime.nativeimage.NativeLibraryFeature"
-        ) ++ (if (areStdlibsIncluded) Seq(databaseFeature) else Seq())
+        ) ++ (if (areStdlibsIncluded) Seq(databaseFeature, azureFeature)
+              else Seq())
         NativeImage
           .buildNativeImage(
             "enso",
@@ -5331,11 +5334,12 @@ lazy val `std-microsoft` = project
           ignoreDependencies = Some((fileName: String) => {
             val nameCheck = fileName.startsWith(
               "netty-transport-native"
-            ) || fileName.startsWith("netty-tcnative-boringssl-static") ||
-              fileName.startsWith("netty-resolver-dns-native")
+            ) || fileName.startsWith("netty-resolver-dns-native")
 
             (fileName.startsWith("netty-resolver-dns-classes-macos") && StdBits
               .plainOsName() != "macos") ||
+            (fileName.startsWith("netty-tcnative-boringssl-static")) ||
+            (fileName.startsWith("netty-transport-native-epoll")) ||
             nameCheck &&
             StdBits
               .allSupportedOs()
@@ -5345,16 +5349,29 @@ lazy val `std-microsoft` = project
               !sanitizedName.contains(thisPlatform)
             }
           }),
-          logger            = streams.value.log,
+          logger            = logger,
           cacheStoreFactory = cacheStoreFactory,
           previousRun       = prev
         )
       val jnaJar = (`jna-wrapper` / Compile / exportedModuleBin).value
+      val tcnativeJars = JPMSUtils.filterModulesFromUpdate(
+        updateReport = (Compile / update).value,
+        modules = Seq(
+          "io.netty" % "netty-tcnative-boringssl-static" % "2.0.70.Final"
+        ),
+        log                = logger,
+        projName           = moduleName.value,
+        scalaBinaryVersion = scalaBinaryVersion.value,
+        shouldContainAll   = true
+      )
       StdBits
         .extractNativeLibsFromMicrosoft(
           microsoftPolyglotRoot = `std-microsoft-polyglot-root`,
           microsoftNativeLibs   = `std-microsoft-native-libs`,
           jnaJar                = jnaJar,
+          tcNativeJars          = tcnativeJars,
+          updateReport          = (Compile / update).value,
+          scalaBinaryVersion    = scalaBinaryVersion.value,
           logger                = streams.value.log,
           moduleName            = moduleName.value,
           cacheStoreFactory     = cacheStoreFactory,
