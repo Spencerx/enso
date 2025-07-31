@@ -2493,13 +2493,13 @@ lazy val `runtime-language-arrow` =
       libraryDependencies ++= GraalVM.modules ++ slf4jApi.map(_ % Test) ++ Seq(
         "junit"            % "junit"              % junitVersion       % Test,
         "com.github.sbt"   % "junit-interface"    % junitIfVersion     % Test,
-        "org.slf4j"        % "slf4j-nop"          % slf4jVersion       % Test,
+        slf4jNop           % Test,
         "org.apache.arrow" % "arrow-vector"       % apacheArrowVersion % Test,
         "org.apache.arrow" % "arrow-memory-netty" % apacheArrowVersion % Test
       ),
       javaModuleName := "org.enso.interpreter.arrow",
       Compile / moduleDependencies ++= GraalVM.modules,
-      Test / moduleDependencies += projectID.value,
+      Test / internalModuleDependencies += (Compile / exportedModule).value,
       Test / patchModules := {
         val testClassesDir = (Test / productDirectories).value.head
         Map(javaModuleName.value -> Seq(testClassesDir))
@@ -2880,15 +2880,15 @@ lazy val `runtime-benchmarks` =
       // Note that withDebug command only makes sense if you use `@Fork(0)` in your benchmarks.
       commands += WithDebugCommand.withDebug,
       libraryDependencies ++= GraalVM.modules ++ GraalVM.langsPkgs ++ GraalVM.toolsPkgs ++ helidon ++ logbackPkg ++ slf4jApi ++ Seq(
-        "org.openjdk.jmh"     % "jmh-core"                     % jmhVersion,
-        "org.openjdk.jmh"     % "jmh-generator-annprocess"     % jmhVersion,
-        "jakarta.xml.bind"    % "jakarta.xml.bind-api"         % jaxbVersion,
-        "com.sun.xml.bind"    % "jaxb-impl"                    % jaxbVersion,
-        "org.graalvm.truffle" % "truffle-api"                  % graalMavenPackagesVersion,
-        "org.graalvm.truffle" % "truffle-dsl-processor"        % graalMavenPackagesVersion % "provided",
-        "org.slf4j"           % "slf4j-nop"                    % slf4jVersion,
-        "com.typesafe"        % "config"                       % typesafeConfigVersion,
-        "org.netbeans.api"    % "org-netbeans-modules-sampler" % netbeansApiVersion
+        "org.openjdk.jmh"     % "jmh-core"                 % jmhVersion,
+        "org.openjdk.jmh"     % "jmh-generator-annprocess" % jmhVersion,
+        "jakarta.xml.bind"    % "jakarta.xml.bind-api"     % jaxbVersion,
+        "com.sun.xml.bind"    % "jaxb-impl"                % jaxbVersion,
+        "org.graalvm.truffle" % "truffle-api"              % graalMavenPackagesVersion,
+        "org.graalvm.truffle" % "truffle-dsl-processor"    % graalMavenPackagesVersion % "provided",
+        slf4jNop,
+        "com.typesafe"     % "config"                       % typesafeConfigVersion,
+        "org.netbeans.api" % "org-netbeans-modules-sampler" % netbeansApiVersion
       ),
       mainClass :=
         Some("org.enso.interpreter.bench.benchmarks.RuntimeBenchmarksRunner"),
@@ -2899,11 +2899,11 @@ lazy val `runtime-benchmarks` =
       parallelExecution := false,
       Compile / moduleDependencies ++= {
         GraalVM.modules ++ GraalVM.langsPkgs ++ GraalVM.insightPkgs ++ logbackPkg ++ helidon ++ scalaReflect ++ slf4jApi ++ Seq(
-          "org.apache.commons"     % "commons-lang3"                % commonsLangVersion,
-          "org.apache.commons"     % "commons-compress"             % commonsCompressVersion,
-          "commons-io"             % "commons-io"                   % commonsIoVersion,
-          "org.apache.tika"        % "tika-core"                    % tikaVersion,
-          "org.slf4j"              % "slf4j-nop"                    % slf4jVersion,
+          "org.apache.commons" % "commons-lang3"    % commonsLangVersion,
+          "org.apache.commons" % "commons-compress" % commonsCompressVersion,
+          "commons-io"         % "commons-io"       % commonsIoVersion,
+          "org.apache.tika"    % "tika-core"        % tikaVersion,
+          slf4jNop,
           "org.netbeans.api"       % "org-openide-util-lookup"      % netbeansApiVersion,
           "org.netbeans.api"       % "org-netbeans-modules-sampler" % netbeansApiVersion,
           "com.ibm.icu"            % "icu4j"                        % icuVersion,
@@ -2965,7 +2965,7 @@ lazy val `runtime-benchmarks` =
       Compile / addModules := Seq(
         (`runtime` / javaModuleName).value,
         (`benchmarks-common` / javaModuleName).value,
-        "org.slf4j.nop"
+        slf4jNopModule
       ),
       // Benchmark sources are patched into the `org.enso.runtime` module
       Compile / patchModules := {
@@ -3002,7 +3002,7 @@ lazy val `runtime-benchmarks` =
         }.toMap
 
         pkgsExports ++ Map(
-          "org.slf4j.nop/org.slf4j.nop" -> Seq("org.slf4j")
+          s"$slf4jNopModule/$slf4jNopModule" -> Seq(slf4jNop.organization)
         )
       },
       javaOptions ++= {
@@ -4230,7 +4230,8 @@ lazy val `std-benchmarks` = (project in file("std-bits/benchmarks"))
       "org.openjdk.jmh"      % "jmh-core"                 % jmhVersion,
       "org.openjdk.jmh"      % "jmh-generator-annprocess" % jmhVersion,
       "org.graalvm.polyglot" % "polyglot"                 % graalMavenPackagesVersion,
-      "org.slf4j"            % "slf4j-nop"                % slf4jVersion
+      "org.slf4j"            % "slf4j-nop"                % slf4jVersion,
+      "org.netbeans.api"     % "org-openide-util-lookup"  % netbeansApiVersion % "provided"
     ),
     commands += WithDebugCommand.withDebug
   )
@@ -4258,7 +4259,8 @@ lazy val `std-benchmarks` = (project in file("std-bits/benchmarks"))
       "-processor",
       "org.enso.benchmarks.processor.BenchProcessor,org.openjdk.jmh.generators.BenchmarkProcessor",
       // There is no Truffle compiler available for annotation processors. Suppress the warning.
-      "-J-Dpolyglot.engine.WarnInterpreterOnly=false"
+      "-J-Dpolyglot.engine.WarnInterpreterOnly=false",
+      "-J--sun-misc-unsafe-memory-access=allow"
     ),
     Compile / javaOptions ++= Seq(
       // Force killing of alive threads once a benchmark is finished.
@@ -4278,7 +4280,8 @@ lazy val `std-benchmarks` = (project in file("std-bits/benchmarks"))
     Compile / addModules := Seq(
       (`runtime` / javaModuleName).value,
       (`bench-processor` / javaModuleName).value,
-      (`benchmarks-common` / javaModuleName).value
+      (`benchmarks-common` / javaModuleName).value,
+      slf4jNopModule
     ),
     // std benchmark sources are patch into the `org.enso.runtime` module
     Compile / patchModules := {
@@ -4312,7 +4315,7 @@ lazy val `std-benchmarks` = (project in file("std-bits/benchmarks"))
       }.toMap
 
       pkgsExports ++ Map(
-        "org.slf4j.nop/org.slf4j.nop" -> Seq("org.slf4j")
+        s"$slf4jNopModule/$slf4jNopModule" -> Seq(slf4jNop.organization)
       )
     },
     javaOptions ++= testLogProviderOptions,
