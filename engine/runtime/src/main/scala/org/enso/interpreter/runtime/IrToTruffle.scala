@@ -97,7 +97,8 @@ import org.enso.interpreter.runtime.callable.{
   Annotation => RuntimeAnnotation
 }
 import org.enso.interpreter.runtime.data.Type
-import org.enso.interpreter.runtime.scope.{ImportExportScope, ModuleScope}
+import org.enso.interpreter.runtime.scope.ImportExportScope
+import org.enso.interpreter.runtime.scope.ModuleScopeBuilder
 import org.enso.interpreter.{Constants, EnsoLanguage}
 
 import java.math.BigInteger
@@ -125,7 +126,7 @@ import scala.jdk.OptionConverters._
 class IrToTruffle(
   val context: EnsoContext,
   val source: Source,
-  val scopeBuilder: ModuleScope.Builder,
+  val scopeBuilder: ModuleScopeBuilder,
   val compilerConfig: CompilerConfig
 ) {
 
@@ -256,45 +257,46 @@ class IrToTruffle(
           frameInfo
         )
 
-        val function = conversion.body match {
-          case fn: Function =>
-            val bodyBuilder =
-              new expressionProcessor.BuildFunctionBody(
-                conversion.methodName.name,
-                fn.arguments,
-                fn.body,
-                TypeCheckValueNode.single(
-                  AscriptionReason.forFunctionResult("conversion"),
-                  toType
-                ),
-                None,
-                true
+        val function: Supplier[RuntimeFunction] = () =>
+          conversion.body match {
+            case fn: Function =>
+              val bodyBuilder =
+                new expressionProcessor.BuildFunctionBody(
+                  conversion.methodName.name,
+                  fn.arguments,
+                  fn.body,
+                  TypeCheckValueNode.single(
+                    AscriptionReason.forFunctionResult("conversion"),
+                    toType
+                  ),
+                  None,
+                  true
+                )
+              val rootNode = MethodRootNode.build(
+                language,
+                expressionProcessor.scope,
+                scopeBuilder.asModuleScope(),
+                () => bodyBuilder.bodyNode(),
+                makeSection(scopeBuilder.getModule, conversion.location),
+                toType,
+                conversion.methodName.name
               )
-            val rootNode = MethodRootNode.build(
-              language,
-              expressionProcessor.scope,
-              scopeBuilder.asModuleScope(),
-              () => bodyBuilder.bodyNode(),
-              makeSection(scopeBuilder.getModule, conversion.location),
-              toType,
-              conversion.methodName.name
-            )
-            val callTarget = rootNode.getCallTarget
-            val arguments  = bodyBuilder.args()
-            val funcSchema = FunctionSchema
-              .newBuilder()
-              .argumentDefinitions(arguments: _*)
-              .build()
-            new RuntimeFunction(
-              callTarget,
-              null,
-              funcSchema
-            )
-          case _ =>
-            throw new CompilerError(
-              s"Conversion bodies must be functions at the point of codegen (conversion $fromType to $toType)."
-            )
-        }
+              val callTarget = rootNode.getCallTarget
+              val arguments  = bodyBuilder.args()
+              val funcSchema = FunctionSchema
+                .newBuilder()
+                .argumentDefinitions(arguments: _*)
+                .build()
+              new RuntimeFunction(
+                callTarget,
+                null,
+                funcSchema
+              )
+            case _ =>
+              throw new CompilerError(
+                s"Conversion bodies must be functions at the point of codegen (conversion $fromType to $toType)."
+              )
+          }
         scopeBuilder.registerConversionMethod(toType, fromType, function)
       }
     }
@@ -361,7 +363,7 @@ class IrToTruffle(
     override protected def processTypeDefinition(typ: Definition.Type): Unit = {
       val atomDefs = typ.members
       val asType =
-        scopeBuilder.asModuleScope().getType(typ.name.name, true)
+        scopeBuilder.getType(typ.name.name, true)
       val atomConstructors =
         atomDefs.map(cons => asType.getConstructors.get(cons.name.name))
       atomConstructors
@@ -1060,10 +1062,12 @@ class IrToTruffle(
                         s"Source type should be defined in module ${module.getName}"
                       )
                       val conversionFun =
-                        actualScope.lookupConversionDefinition(
-                          sourceTp,
-                          targetTp
-                        )
+                        actualScope
+                          .asModuleScope()
+                          .lookupConversionDefinition(
+                            sourceTp,
+                            targetTp
+                          )
                       org.enso.common.Asserts.assertInJvm(
                         conversionFun != null,
                         s"Conversion method `$conversionMethod` should be defined in module ${module.getName}"
@@ -2539,9 +2543,9 @@ class IrToTruffle(
       }
   }
 
-  private def asScope(module: CompilerContext.Module): ModuleScope = {
+  private def asScope(module: CompilerContext.Module): ModuleScopeBuilder = {
     val m = org.enso.interpreter.runtime.Module.fromCompilerModule(module)
-    m.getScope()
+    m.getScopeBuilder()
   }
 
   private def asType(
@@ -2549,14 +2553,16 @@ class IrToTruffle(
   ): Type = {
     val m = org.enso.interpreter.runtime.Module
       .fromCompilerModule(typ.module.unsafeAsModule())
-    m.getScope().getType(typ.tp.name, true)
+    val sb = m.getScopeBuilder()
+    sb.getType(typ.tp.name, true)
   }
 
   private def asAssociatedType(
     module: CompilerContext.Module
   ): Type = {
-    val m = org.enso.interpreter.runtime.Module.fromCompilerModule(module)
-    m.getScope().getAssociatedType()
+    val m  = org.enso.interpreter.runtime.Module.fromCompilerModule(module)
+    val sb = m.getScopeBuilder()
+    sb.getAssociatedType()
   }
 
   private def scopeAssociatedType =
