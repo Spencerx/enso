@@ -98,7 +98,6 @@ import org.enso.interpreter.runtime.callable.{
 }
 import org.enso.interpreter.runtime.data.Type
 import org.enso.interpreter.runtime.scope.ImportExportScope
-import org.enso.interpreter.runtime.scope.ModuleScopeBuilder
 import org.enso.interpreter.{Constants, EnsoLanguage}
 import org.enso.interpreter.runtime.builtin.Builtins
 
@@ -127,7 +126,7 @@ import scala.jdk.OptionConverters._
 class IrToTruffle(
   val context: EnsoContext,
   val source: Source,
-  val scopeBuilder: ModuleScopeBuilder,
+  val scopeBuilder: TruffleCompilerModuleScopeBuilder,
   val compilerConfig: CompilerConfig
 ) {
   private def getBuiltins: Builtins = {
@@ -532,7 +531,7 @@ class IrToTruffle(
       val fieldNames = atomDefn.arguments.map(_.name.name).toArray
       atomCons.initializeFields(
         language,
-        scopeBuilder,
+        scopeBuilder.toCompilerBuilder(),
         initializationBuilderSupplier,
         fieldNames
       )
@@ -2559,7 +2558,9 @@ class IrToTruffle(
       }
   }
 
-  private def asScope(module: CompilerContext.Module): ModuleScopeBuilder = {
+  private def asScope(
+    module: CompilerContext.Module
+  ): TruffleCompilerModuleScopeBuilder = {
     TruffleCompilerModuleScopeBuilder.fromCompilerModule(module)
   }
 
