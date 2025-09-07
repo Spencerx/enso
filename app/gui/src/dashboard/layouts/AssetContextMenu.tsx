@@ -30,8 +30,7 @@ import * as backendModule from '#/services/Backend'
 import * as object from '#/utilities/object'
 import * as permissions from '#/utilities/permissions'
 import { useMutationCallback } from '#/utilities/tanstackQuery'
-import * as authProvider from '$/providers/react'
-import { useBackends, useText } from '$/providers/react'
+import { useBackends, useFullUserSession, useRouter, useText } from '$/providers/react'
 import * as featureFlagsProvider from '$/providers/react/featureFlags'
 import type { RightPanelData } from '$/providers/rightPanel'
 import {
@@ -67,11 +66,12 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
 
   const isCloud = categoryModule.isCloudCategory(category)
 
+  const { router } = useRouter()
   const { localCategories } = useCategories()
 
   const getAsset = useGetAsset()
   const canRunProjects = useCanRunProjects()
-  const { user } = authProvider.useFullUserSession()
+  const { user } = useFullUserSession()
   const { localBackend } = useBackends()
   const { getText } = useText()
   const openProjectNatively = projectHooks.useOpenProjectNatively()
@@ -154,11 +154,17 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
     asset.projectState.openedBy != null &&
     asset.projectState.openedBy !== user.email
 
+  const goToDrive = async () => {
+    if (router.currentRoute.value.path === '/drive') return
+    await router.push({ ...router.currentRoute.value, path: '/drive' })
+  }
+
   const pasteMenuEntry = defineMenuEntry(
     hasPasteData &&
       canPaste && {
         action: 'paste',
         doAction: () => {
+          void goToDrive()
           const directoryId =
             asset.type === backendModule.AssetType.directory ? asset.id : asset.parentId
           doPaste(directoryId, directoryId)
@@ -173,6 +179,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
       color: 'accent',
       action: 'copyId',
       doAction: () => {
+        void goToDrive()
         void copyMutation.mutateAsync(asset.id)
       },
     },
@@ -187,6 +194,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
             action: 'undelete',
             label: getText('restoreFromTrashShortcut'),
             doAction: () => {
+              void goToDrive()
               void restoreAssetsMutation({
                 ids: [asset.id],
                 parentId: null,
@@ -197,6 +205,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
             action: 'delete',
             label: getText('deleteForeverShortcut'),
             doAction: () => {
+              void goToDrive()
               setModal(
                 <ConfirmDeleteModal
                   defaultOpen
@@ -217,6 +226,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
           asset.type === backendModule.AssetType.file) && {
           action: 'useInNewProject',
           doAction: () => {
+            void goToDrive()
             void newProject({ templateName: asset.title, ensoPath: asset.ensoPath }, asset.parentId)
           },
         },
@@ -228,6 +238,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
             isDisabled: !canRunProjects.locally[backend.type],
             tooltip: disabledTooltip,
             doAction: () => {
+              void goToDrive()
               void openProjectLocally(asset, backend.type)
             },
           },
@@ -238,6 +249,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
             isDisabled: !canRunProjects.natively[backend.type],
             tooltip: disabledTooltip,
             doAction: () => {
+              void goToDrive()
               void openProjectNatively(asset, backend.type)
             },
           },
@@ -247,6 +259,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
           !isOtherUserUsingProject && {
             action: 'close',
             doAction: () => {
+              void goToDrive()
               void closeProject({
                 id: asset.id,
                 title: asset.title,
@@ -258,6 +271,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
         isCloud && {
           action: 'label',
           doAction: () => {
+            void goToDrive()
             setModal(<ManageLabelsModal backend={backend} item={asset} triggerRef={triggerRef} />)
           },
         },
@@ -268,6 +282,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
             action: 'uploadToCloud',
             feature: 'uploadToCloud',
             doAction: () => {
+              void goToDrive()
               void uploadFileToCloudMutation(localBackend, {
                 assets: [asset],
                 targetDirectoryId: user.rootDirectoryId,
@@ -279,11 +294,25 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
           localBackend != null && {
             action: 'downloadToLocal',
             doAction: () => {
+              void goToDrive()
               void uploadFileToLocal([asset])
             },
           },
-        { action: 'copy', doAction: doCopy },
-        !isRunningProject && !isOtherUserUsingProject && { action: 'cut', doAction: doCut },
+        {
+          action: 'copy',
+          doAction: () => {
+            void goToDrive()
+            doCopy()
+          },
+        },
+        !isRunningProject &&
+          !isOtherUserUsingProject && {
+            action: 'cut',
+            doAction: () => {
+              void goToDrive()
+              doCut()
+            },
+          },
         pasteMenuEntry,
         (isCloud ?
           asset.type !== backendModule.AssetType.directory
@@ -291,6 +320,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
           isDisabled: asset.type === backendModule.AssetType.secret,
           action: 'download',
           doAction: () => {
+            void goToDrive()
             void downloadAssetsMutation({
               ids: [{ id: asset.id, title: asset.title }],
               targetDirectoryId:
@@ -304,6 +334,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
           !isOtherUserUsingProject && {
             action: 'rename',
             doAction: () => {
+              void goToDrive()
               setRowState(object.merger({ isEditingName: true }))
             },
           },
@@ -312,6 +343,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
           canEditThisAsset && {
             action: 'edit',
             doAction: () => {
+              void goToDrive()
               rightPanel.setTemporaryTab('settings')
               rightPanel.updateContext('drive', (ctx) => {
                 ctx.category = category
@@ -329,12 +361,14 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
         asset.type === backendModule.AssetType.project && {
           action: 'duplicate',
           doAction: () => {
+            void goToDrive()
             void copyAssetsMutation([[asset.id], asset.parentId])
           },
         },
         {
           action: 'exportArchive',
           doAction: () => {
+            void goToDrive()
             void exportArchive()
           },
         },
@@ -345,6 +379,7 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
             action: 'delete',
             label: isCloud ? getText('moveToTrashShortcut') : getText('deleteShortcut'),
             doAction: () => {
+              void goToDrive()
               const textId = isCloud ? 'trashTheAssetTypeTitle' : 'deleteTheAssetTypeTitle'
               setModal(
                 <ConfirmDeleteModal
@@ -366,12 +401,14 @@ export const AssetContextMenu = React.forwardRef(function AssetContextMenu(
           systemApi && {
             action: 'openInFileBrowser',
             doAction: () => {
+              void goToDrive()
               systemApi.showItemInFolder(encodedEnsoPath)
             },
           },
         encodedEnsoPath != null && {
           action: 'copyAsPath',
           doAction: () => {
+            void goToDrive()
             void copyMutation.mutateAsync(encodedEnsoPath)
           },
         },

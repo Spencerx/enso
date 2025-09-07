@@ -287,6 +287,9 @@ importers:
       events:
         specifier: ^3.3.0
         version: 3.3.0
+      fuzzysort:
+        specifier: 3.1.0
+        version: 3.1.0
       hash-sum:
         specifier: ^2.0.0
         version: 2.0.0
@@ -5106,6 +5109,9 @@ packages:
 
   functions-have-names@1.2.3:
     resolution: {integrity: sha512-xckBUXyTIqT97tq2x2AMb+g163b5JFysYk0x4qxNFwbfQkmNZoiRHb6sPzI9/QV33WeuvVYBUIiD4NzNIyqaRQ==}
+
+  fuzzysort@3.1.0:
+    resolution: {integrity: sha512-sR9BNCjBg6LNgwvxlBd0sBABvQitkLzoVY9MYYROQVX/FvfJ4Mai9LsGhDgd8qYdds0bY77VzYd5iuB+v5rwQQ==}
 
   gensync@1.0.0-beta.2:
     resolution: {integrity: sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg==}
@@ -11301,11 +11307,11 @@ snapshots:
       vite: 7.1.2(@types/node@24.2.1)(jiti@1.21.7)(terser@5.37.0)(yaml@2.7.0)
       vue: 3.5.13(typescript@5.7.2)
 
-  '@vitest/browser@3.2.4(playwright@1.50.1)(vite@7.1.2(@types/node@24.2.1)(jiti@1.21.7)(terser@5.37.0)(yaml@2.7.0))(vitest@3.2.4)':
+  '@vitest/browser@3.2.4(playwright@1.54.1)(vite@6.2.5(@types/node@24.2.1)(jiti@1.21.7)(terser@5.37.0)(yaml@2.7.0))(vitest@3.2.4)':
     dependencies:
       '@testing-library/dom': 10.4.0
       '@testing-library/user-event': 14.6.1(@testing-library/dom@10.4.0)
-      '@vitest/mocker': 3.2.4(vite@7.1.2(@types/node@24.2.1)(jiti@1.21.7)(terser@5.37.0)(yaml@2.7.0))
+      '@vitest/mocker': 3.2.4(vite@6.2.5(@types/node@24.2.1)(jiti@1.21.7)(terser@5.37.0)(yaml@2.7.0))
       '@vitest/utils': 3.2.4
       magic-string: 0.30.17
       sirv: 3.0.1
@@ -11313,7 +11319,7 @@ snapshots:
       vitest: 3.2.4(@types/debug@4.1.12)(@types/node@24.2.1)(@vitest/browser@3.2.4)(jiti@1.21.7)(jsdom@26.1.0)(terser@5.37.0)(yaml@2.7.0)
       ws: 8.18.0
     optionalDependencies:
-      playwright: 1.50.1
+      playwright: 1.54.1
     transitivePeerDependencies:
       - bufferutil
       - msw
@@ -11336,15 +11342,6 @@ snapshots:
       magic-string: 0.30.17
     optionalDependencies:
       vite: 6.2.5(@types/node@24.2.1)(jiti@1.21.7)(terser@5.37.0)(yaml@2.7.0)
-
-  '@vitest/mocker@3.2.4(vite@7.1.2(@types/node@24.2.1)(jiti@1.21.7)(terser@5.37.0)(yaml@2.7.0))':
-    dependencies:
-      '@vitest/spy': 3.2.4
-      estree-walker: 3.0.3
-      magic-string: 0.30.17
-    optionalDependencies:
-      vite: 7.1.2(@types/node@24.2.1)(jiti@1.21.7)(terser@5.37.0)(yaml@2.7.0)
-    optional: true
 
   '@vitest/pretty-format@3.2.4':
     dependencies:
@@ -13408,6 +13405,8 @@ snapshots:
       is-callable: 1.2.7
 
   functions-have-names@1.2.3: {}
+
+  fuzzysort@3.1.0: {}
 
   gensync@1.0.0-beta.2: {}
 
@@ -16415,7 +16414,7 @@ snapshots:
     optionalDependencies:
       '@types/debug': 4.1.12
       '@types/node': 24.2.1
-      '@vitest/browser': 3.2.4(playwright@1.50.1)(vite@7.1.2(@types/node@24.2.1)(jiti@1.21.7)(terser@5.37.0)(yaml@2.7.0))(vitest@3.2.4)
+      '@vitest/browser': 3.2.4(playwright@1.54.1)(vite@6.2.5(@types/node@24.2.1)(jiti@1.21.7)(terser@5.37.0)(yaml@2.7.0))(vitest@3.2.4)
       jsdom: 26.1.0
     transitivePeerDependencies:
       - jiti

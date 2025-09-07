@@ -307,10 +307,8 @@ function CategorySwitcher(props: CategorySwitcherProps) {
             className="my-auto opacity-0 transition-opacity group-hover:opacity-100"
             onPress={() => {
               void router.push({
-                query: {
-                  [`${SEARCH_PARAMS_PREFIX}SettingsTab`]: JSON.stringify('local'),
-                  [`${SEARCH_PARAMS_PREFIX}page`]: JSON.stringify('settings'),
-                },
+                path: '/settings',
+                query: { [`${SEARCH_PARAMS_PREFIX}SettingsTab`]: JSON.stringify('local') },
               })
             }}
           />
