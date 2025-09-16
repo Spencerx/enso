@@ -5,6 +5,7 @@
 - [Allow selecting target type for Any.to method][13685].
 - [Command Palette to search for arbitrary actions][13658]
 - [Fix mouse interactions with JSON visualization][13971]
+- [There is no need for adding `--no-sandbox` flag in Ubuntu anymore][13990].
 - [The documentation panel opens to the scroll position at last close][13647]
 - [Autocompletion for Column methods in table expressions][13797]
 - [Autocompletion for Column names in table expressions][13848]
@@ -12,6 +13,7 @@
 [13685]: https://github.com/enso-org/enso/pull/13685
 [13658]: https://github.com/enso-org/enso/pull/13658
 [13971]: https://github.com/enso-org/enso/pull/13971
+[13990]: https://github.com/enso-org/enso/pull/13990
 [13647]: https://github.com/enso-org/enso/pull/13647
 [13797]: https://github.com/enso-org/enso/pull/13797
 [13848]: https://github.com/enso-org/enso/pull/13848
