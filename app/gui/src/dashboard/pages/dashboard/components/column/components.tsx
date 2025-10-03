@@ -76,7 +76,12 @@ export function LabelsColumn(props: AssetColumnProps) {
   const labelsList = (item.labels ?? [])
     .filter((label) => labelsByName.has(label))
     .map((label) => (
-      <LabelInColumn label={label} color={labelsByName.get(label)?.color} doDelete={doDelete} />
+      <LabelInColumn
+        key={label}
+        label={label}
+        color={labelsByName.get(label)?.color}
+        doDelete={doDelete}
+      />
     ))
 
   return (
