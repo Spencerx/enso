@@ -6,6 +6,8 @@ import com.oracle.truffle.api.library.ExportLibrary;
 import com.oracle.truffle.api.library.ExportMessage;
 import com.oracle.truffle.api.nodes.Node;
 import java.io.ByteArrayOutputStream;
+import java.lang.ref.Reference;
+import java.lang.ref.WeakReference;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Objects;
@@ -20,6 +22,7 @@ import org.enso.common.MethodNames.Module;
 import org.enso.common.MethodNames.TopScope;
 import org.enso.common.RuntimeOptions;
 import org.enso.interpreter.runtime.EnsoContext;
+import org.enso.polyglot.PolyglotContext;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.Source;
@@ -62,17 +65,20 @@ public final class ContextUtils implements TestRule, AutoCloseable {
   private final ByteArrayOutputStream stdErr;
   private final Context.Builder ctxBldr;
   private final boolean alwaysExecuteInContext;
+  private final Boolean assertGC;
   private Context context;
 
   private ContextUtils(
       Context.Builder ctxBldr,
       ByteArrayOutputStream stdOut,
       ByteArrayOutputStream stdErr,
-      boolean alwaysExecuteInContext) {
+      boolean alwaysExecuteInContext,
+      Boolean assertGC) {
     this.stdOut = Objects.requireNonNull(stdOut);
     this.stdErr = Objects.requireNonNull(stdErr);
     this.ctxBldr = Objects.requireNonNull(ctxBldr);
     this.alwaysExecuteInContext = alwaysExecuteInContext;
+    this.assertGC = assertGC;
   }
 
   /**
@@ -81,6 +87,7 @@ public final class ContextUtils implements TestRule, AutoCloseable {
    *
    * @param permittedLanguages List of languages that are allowed to be used in the context. If
    *     empty, all installed languages are enabled.
+   * @return new instance of builder
    * @see Context#newBuilder(String...)
    */
   public static Builder newBuilder(String... permittedLanguages) {
@@ -93,7 +100,7 @@ public final class ContextUtils implements TestRule, AutoCloseable {
     var stderr = new ByteArrayOutputStream();
     var ctxBldr = Builder.defaultContextBuilder();
     ctxBldr.out(stdout).err(stderr).logHandler(stdout);
-    return new ContextUtils(ctxBldr, stdout, stderr, true);
+    return new ContextUtils(ctxBldr, stdout, stderr, true, null);
   }
 
   /**
@@ -126,9 +133,21 @@ public final class ContextUtils implements TestRule, AutoCloseable {
 
   @Override
   public void close() {
+    var checkGC = Boolean.TRUE.equals(assertGC);
+    close(checkGC);
+  }
+
+  private void close(boolean checkGC) {
     if (context != null) {
+      Reference<Object> ref = null;
+      if (checkGC) {
+        ref = new WeakReference<>(ensoContext());
+      }
       context.close();
       context = null;
+      if (ref != null) {
+        MemoryUtils.assertGC("EnsoContext can be GCed when context is closed", true, ref);
+      }
     }
     resetOut();
   }
@@ -140,6 +159,10 @@ public final class ContextUtils implements TestRule, AutoCloseable {
 
   public Context context() {
     return currentCtx();
+  }
+
+  public org.enso.polyglot.TopScope topScope() {
+    return new PolyglotContext(currentCtx()).getTopScope();
   }
 
   /** Leaks the underlying {@link EnsoContext} from this context. */
@@ -384,6 +407,7 @@ public final class ContextUtils implements TestRule, AutoCloseable {
     private final ByteArrayOutputStream stdout = new ByteArrayOutputStream();
     private final ByteArrayOutputStream stderr = new ByteArrayOutputStream();
     private boolean alwaysExecuteInContext = true;
+    private Boolean assertGC;
 
     private Builder(String... permittedLanguages) {
       this.polyglotCtxBldr = defaultContextBuilder(permittedLanguages);
@@ -441,8 +465,35 @@ public final class ContextUtils implements TestRule, AutoCloseable {
       return this;
     }
 
+    /**
+     * Enables or disables an "assert GC" check to be performed at the end of {@link ContextUtils}
+     * usage. Explicitly setting this flag overrides any defaults. Not calling this method leaves
+     * the <em>default behavior</em> on:
+     *
+     * <ul>
+     *   <li>when the context utils are used as a {@code @Rule} or {@code @ClassRule} then the
+     *       "assert GC mode" is <strong>on by default</strong> and checked at the end of {@link
+     *       ContextUtils#apply} invocation
+     *   <li>when the context utils are used manually - for example in a <em>try with resources</em>
+     *       block, then the "assert GC mode" is <strong>off by default</strong>
+     * </ul>
+     *
+     * The motivation for the above described default behavior is based on presence of local
+     * variables on stack - with manual usage, there are likely to be local variables and hold some
+     * references when the {@link ContextUtils#close()} is called. Hence one has to opt-in to enable
+     * the "assert GC mode". When used as JUnit rule, there are no local variables anymore and thus
+     * the major source of "test only leaks" is avoided.
+     *
+     * @param check explicitly enables/disables GC check
+     * @return this builder
+     */
+    public Builder assertGC(boolean check) {
+      this.assertGC = check;
+      return this;
+    }
+
     public ContextUtils build() {
-      return new ContextUtils(polyglotCtxBldr, stdout, stderr, alwaysExecuteInContext);
+      return new ContextUtils(polyglotCtxBldr, stdout, stderr, alwaysExecuteInContext, assertGC);
     }
   }
 
@@ -458,7 +509,7 @@ public final class ContextUtils implements TestRule, AutoCloseable {
     /** Evaluates jUnit {@link org.junit.Test}. */
     @Override
     public void evaluate() throws Throwable {
-      try (var ctx = currentCtx()) {
+      try {
         if (alwaysExecuteInContext) {
           executeInContext(
               () -> {
@@ -475,7 +526,8 @@ public final class ContextUtils implements TestRule, AutoCloseable {
       } catch (Throwable t) {
         throw new FailureWithOutput("Compiler output: " + stdOut, t);
       } finally {
-        close();
+        var avoidAssertGC = Boolean.FALSE.equals(assertGC);
+        close(!avoidAssertGC);
       }
     }
 
