@@ -60,6 +60,7 @@
 - [Snowflake file format and copy into support.][14221]
 - [Snowflake bulk load API.][14230]
 - [Add error_on_missing_columns to more methods.][14236]
+- [Add `OneDrive_File` to Microsoft 365 implementation.][14237]
 - [Progress of `Runtime.sleep` visualized.][14275]
 - [Full DuckDB Dialect.][14298]
 
@@ -77,6 +78,7 @@
 [14221]: https://github.com/enso-org/enso/pull/14221
 [14230]: https://github.com/enso-org/enso/pull/14230
 [14236]: https://github.com/enso-org/enso/pull/14236
+[14237]: https://github.com/enso-org/enso/pull/14237
 [14275]: https://github.com/enso-org/enso/pull/14275
 [14298]: https://github.com/enso-org/enso/pull/14298
 
