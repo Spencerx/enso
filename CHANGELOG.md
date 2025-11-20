@@ -62,6 +62,7 @@
 - [Add error_on_missing_columns to more methods.][14236]
 - [Add `OneDrive_File` to Microsoft 365 implementation.][14237]
 - [Progress of `Runtime.sleep` visualized.][14275]
+- [Add Email.send][14258]
 - [Full DuckDB Dialect.][14298]
 
 [13769]: https://github.com/enso-org/enso/pull/13769
@@ -80,6 +81,7 @@
 [14236]: https://github.com/enso-org/enso/pull/14236
 [14237]: https://github.com/enso-org/enso/pull/14237
 [14275]: https://github.com/enso-org/enso/pull/14275
+[14258]: https://github.com/enso-org/enso/pull/14258
 [14298]: https://github.com/enso-org/enso/pull/14298
 
 #### Enso Language & Runtime
