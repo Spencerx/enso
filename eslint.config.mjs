@@ -185,6 +185,7 @@ const config = [
       '**/generated',
       '**/*.json',
       'app/rust-ffi/pkg/',
+      'app/electron-client/electron-builder-config.cjs',
     ],
   },
   {
@@ -210,10 +211,14 @@ const config = [
           allowDefaultProject: [
             'git-clean.mjs',
             'eslint.config.mjs',
+            'internal/envReplacer.mjs',
+            'internal/workspaceStatus.mjs',
             // 'app/ydoc-server/vitest.config.ts',
             'app/ydoc-shared/vitest.config.ts',
             'app/project-manager-shim/scripts/*.js',
             'app/ide-desktop/icons/src/index.js',
+            'app/electron-client/electron-builder-config.cjs',
+            'app/electron-client/esbuild.config.mjs',
           ],
         },
       },
