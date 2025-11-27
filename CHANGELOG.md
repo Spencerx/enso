@@ -21,6 +21,8 @@
 - [Added immediate rename of user created components][14209]
 - [Multiple opened projects' tabs are now allowed][14215]
 - [Required arguments now have an arrow displayed on top of the port][14270]
+- [Connections between components may be selected with click][14311] and deleted
+  with <kbd>Delete</kbd> key.
 - [Improved visuals of high components][14267]. Their contents is aligned to
   top.
 
@@ -41,6 +43,7 @@
 [14209]: https://github.com/enso-org/enso/pull/14209
 [14215]: https://github.com/enso-org/enso/pull/14215
 [14270]: https://github.com/enso-org/enso/pull/14270
+[14311]: https://github.com/enso-org/enso/pull/14311
 [14267]: https://github.com/enso-org/enso/pull/14267
 
 #### Enso Standard Library
