@@ -71,6 +71,7 @@
 - [Full DuckDB Dialect.][14298]
 - [Initial Spatial support within DuckDB][14331]
 - [Add email SMTP support][14350]
+- [Read files into DuckDB both spatial and not.][14367]
 - [Implement Text_Column to_case for DB backends][14386]
 
 [13769]: https://github.com/enso-org/enso/pull/13769
@@ -93,6 +94,7 @@
 [14298]: https://github.com/enso-org/enso/pull/14298
 [14331]: https://github.com/enso-org/enso/pull/14331
 [14350]: https://github.com/enso-org/enso/pull/14350
+[14367]: https://github.com/enso-org/enso/pull/14367
 [14386]: https://github.com/enso-org/enso/pull/14386
 
 #### Enso Language & Runtime
@@ -102,7 +104,7 @@
 - [Moving >, >=, <, <= to types where such operators make sense][14017]
 - [Moving warning releated methods outside of `Any`][13978]
 - [Moving error relelated methods outside of `Any`][14003]
-- [Defining to_text & co. as extension methods](14050)
+- [Defining to_text & co. as extension methods][14050]
 - [Register and `lookup_services` in package.yaml][11868]
 - [Open type check `Type&Any` lets all visible types thru][13225]
 - [Removal of --no-global-cache option][13909]
