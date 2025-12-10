@@ -114,6 +114,7 @@ public interface Builder {
       var localType = StorageType.fromTypeCharAndSize(proxyType.typeChar(), proxyType.size());
       var localStorage =
           switch (localType) {
+            case BooleanType type -> BoolBuilder.fromAddress(size, data, validity).seal(storage);
             case IntegerType type ->
                 LongBuilder.fromAddress(size, data, validity, type).seal(storage, type);
             default -> storage;
