@@ -114,12 +114,21 @@ public interface Builder {
       var localType = StorageType.fromTypeCharAndSize(proxyType.typeChar(), proxyType.size());
       var localStorage =
           switch (localType) {
+            case BooleanType type -> BoolBuilder.fromAddress(size, data, validity).seal(storage);
             case IntegerType type ->
                 LongBuilder.fromAddress(size, data, validity, type).seal(storage, type);
+            case FloatType type ->
+                DoubleBuilder.fromAddress(size, data, validity, type).seal(storage, type);
             default -> storage;
           };
       assert assertSameStorages(storage, localStorage);
       return (ColumnStorage<T>) localStorage;
+    } else {
+      if (BuilderUtil.LOG.isTraceEnabled()) {
+        var t = storage.getType();
+        BuilderUtil.LOG.trace(
+            "makeLocal unsuccessful for {}:{} size {}", t.typeChar(), t.size(), storage.getSize());
+      }
     }
     return storage;
   }
