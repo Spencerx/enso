@@ -17,7 +17,6 @@ import Dependencies.*
 import JarExtractor.{
   CopyToOutputJar,
   LinuxAMD64,
-  MacOSAMD64,
   MacOSArm64,
   PolyglotLib,
   WindowsAMD64
@@ -5321,7 +5320,6 @@ lazy val `opencv-wrapper` = project
     jarExtractor := JarExtractor(
       "nu/pattern/opencv/linux/x86_64/*.so"    -> PolyglotLib(LinuxAMD64),
       "nu/pattern/opencv/osx/ARMv8/*.dylib"    -> PolyglotLib(MacOSArm64),
-      "nu/pattern/opencv/osx/x86_64/*.dylib"   -> PolyglotLib(MacOSAMD64),
       "nu/pattern/opencv/windows/x86_64/*.dll" -> PolyglotLib(WindowsAMD64),
       "nu/pattern/*.class"                     -> CopyToOutputJar,
       "META-INF/**"                            -> CopyToOutputJar,
@@ -5339,9 +5337,6 @@ lazy val `jna-wrapper-extracted` = project
     jarExtractor := JarExtractor(
       "com/sun/jna/linux-x86-64/libjnidispatch.so" -> PolyglotLib(LinuxAMD64),
       "com/sun/jna/win32-x86-64/jnidispatch.dll"   -> PolyglotLib(WindowsAMD64),
-      "com/sun/jna/darwin-x86-64/libjnidispatch.jnilib" -> PolyglotLib(
-        MacOSAMD64
-      ),
       "com/sun/jna/darwin-aarch64/libjnidispatch.jnilib" -> PolyglotLib(
         MacOSArm64
       ),
@@ -5395,9 +5390,6 @@ lazy val `netty-tc-native-wrapper` = project
     jarExtractor := JarExtractor(
       "META-INF/native/libnetty_tcnative_osx_aarch_64.jnilib" -> PolyglotLib(
         MacOSArm64
-      ),
-      "META-INF/native/libnetty_tcnative_osx_x86_64.jnilib" -> PolyglotLib(
-        MacOSAMD64
       ),
       "META-INF/native/netty_tcnative_windows_x86_64.dll" -> PolyglotLib(
         WindowsAMD64
@@ -5482,7 +5474,6 @@ lazy val `tableau-wrapper` = project
     },
     jarExtractor := JarExtractor(
       "darwin-aarch64/libtableauhyperapi.dylib" -> PolyglotLib(MacOSArm64),
-      "darwin-x86-64/libtableauhyperapi.dylib"  -> PolyglotLib(MacOSAMD64),
       "linux-x86-64/libtableauhyperapi.so"      -> PolyglotLib(LinuxAMD64),
       "win32-x86-64/tableauhyperapi.dll"        -> PolyglotLib(WindowsAMD64)
     )
@@ -5505,9 +5496,6 @@ lazy val `grpc-wrapper` = project
       ),
       "META-INF/native/libio_grpc_netty_shaded_netty_tcnative_osx_aarch_64.jnilib" -> PolyglotLib(
         MacOSArm64
-      ),
-      "META-INF/native/libio_grpc_netty_shaded_netty_tcnative_osx_x86_64.jnilib" -> PolyglotLib(
-        MacOSAMD64
       ),
       "META-INF/native/io_grpc_netty_shaded_netty_tcnative_windows_x86_64.dll" -> PolyglotLib(
         WindowsAMD64
@@ -5550,9 +5538,6 @@ lazy val `jline-wrapper` = project
       "org/jline/nativ/Mac/arm64/libjlinenative.jnilib" -> PolyglotLib(
         MacOSArm64
       ),
-      "org/jline/nativ/Mac/x86_64/libjlinenative.jnilib" -> PolyglotLib(
-        MacOSAMD64
-      ),
       "org/jline/nativ/Windows/x86_64/jlinenative.dll" -> PolyglotLib(
         WindowsAMD64
       ),
@@ -5574,9 +5559,6 @@ lazy val `conscrypt-wrapper` = project
     jarExtractor := JarExtractor(
       "META-INF/native/libconscrypt_openjdk_jni-linux-x86_64.so" -> PolyglotLib(
         LinuxAMD64
-      ),
-      "META-INF/native/libconscrypt_openjdk_jni-osx-x86_64.dylib" -> PolyglotLib(
-        MacOSAMD64
       ),
       "META-INF/native/conscrypt_openjdk_jni-windows-x86_64.dll" -> PolyglotLib(
         WindowsAMD64
@@ -5601,9 +5583,6 @@ lazy val `sqlite-wrapper` = project
       ),
       "org/sqlite/native/Mac/aarch64/libsqlitejdbc.dylib" -> PolyglotLib(
         MacOSArm64
-      ),
-      "org/sqlite/native/Mac/x86_64/libsqlitejdbc.dylib" -> PolyglotLib(
-        MacOSAMD64
       ),
       "org/sqlite/native/Windows/x86_64/sqlitejdbc.dll" -> PolyglotLib(
         WindowsAMD64
@@ -5631,7 +5610,6 @@ lazy val `duckdb-wrapper` = project
     jarExtractor := JarExtractor(
       "libduckdb_java.so_linux_amd64"   -> PolyglotLib(LinuxAMD64),
       "libduckdb_java.so_osx_universal" -> PolyglotLib(MacOSArm64),
-      "libduckdb_java.so_osx_universal" -> PolyglotLib(MacOSAMD64),
       "libduckdb_java.so_windows_amd64" -> PolyglotLib(WindowsAMD64),
       "META-INF/**"                     -> CopyToOutputJar,
       "org/**/*.class"                  -> CopyToOutputJar
