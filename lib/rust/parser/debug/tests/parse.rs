@@ -1500,7 +1500,7 @@ fn big_array() {
 #[test]
 fn space_required() {
     test_block!("foo = if cond.x else.y",
-        @"Invalid macro invocation: (BodyBlock #((Assignment () (Ident foo) (App (App (Invalid) (PropertyAccess (Ident cond) x)) (PropertyAccess (Ident else) y)))))");
+        @"Invalid macro invocation: (BodyBlock #((Assignment () (Ident foo) (App (App (Invalid) (PropertyAccess (Ident cond) x)) (MultiSegmentApp #(((Ident else) (PropertyAccess () y))))))))");
 }
 
 #[test]
