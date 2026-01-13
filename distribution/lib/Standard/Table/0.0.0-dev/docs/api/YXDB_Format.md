@@ -1,7 +1,7 @@
 ## Enso Signatures 1.0
-## module Standard.Table.Alteryx_Format
-- type Alteryx_Format
-    - Alteryx_Format
+## module Standard.Table.YXDB_Format
+- type YXDB_Format
+    - YXDB_Format
     - for_file_write file:Standard.Base.Any.Any -> Standard.Base.Any.Any
     - for_read file:Standard.Base.System.File_Format_Metadata.File_Format_Metadata -> Standard.Base.Any.Any
     - get_dropdown_options -> Standard.Base.Any.Any
