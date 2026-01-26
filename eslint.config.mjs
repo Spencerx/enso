@@ -224,6 +224,7 @@ const config = [
             'app/electron-client/electron-builder-config.cjs',
             'app/electron-client/esbuild.config.mjs',
             'app/gui/scripts/generateIconMetadata.mjs',
+            'app/electron-client/export-config.mjs',
           ],
         },
       },
