@@ -18,11 +18,9 @@ import org.enso.compiler.core.ir.expression.{errors, Application, Case}
 import org.enso.compiler.core.ir.module.scope.definition
 import org.enso.compiler.data.CompilerConfig
 import org.enso.compiler.pass.PassConfiguration._
-import org.enso.compiler.pass.analyse.DataflowAnalysis.DependencyInfo.Type.asStatic
-import org.enso.compiler.pass.analyse.DataflowAnalysis.{
-  DependencyInfo,
-  DependencyMapping
-}
+import org.enso.compiler.pass.analyse.DependencyInfo
+import org.enso.compiler.pass.analyse.DependencyInfo.Type.asStatic
+import org.enso.compiler.pass.analyse.DependencyMapping
 import org.enso.compiler.pass.analyse.{AliasAnalysis, DataflowAnalysis}
 import org.enso.compiler.pass.{PassConfiguration, PassGroup, PassManager}
 import org.enso.compiler.test.CompilerTest
@@ -54,7 +52,7 @@ class DataflowAnalysisTest extends CompilerTest {
     * @return a randomly generated identifier dependency
     */
   def genStaticDep: DependencyInfo.Type = {
-    DependencyInfo.Type.Static(genId, None)
+    new DependencyInfo.Type.Static(genId, None)
   }
 
   /** Makes a statically known dependency from the included id.
@@ -76,7 +74,7 @@ class DataflowAnalysisTest extends CompilerTest {
     id: UUID @Identifier,
     extId: Option[UUID @ExternalID]
   ): DependencyInfo.Type = {
-    DependencyInfo.Type.Static(id, extId)
+    new DependencyInfo.Type.Static(id, extId)
   }
 
   /** Makes a symbol dependency from the included string.
@@ -98,7 +96,7 @@ class DataflowAnalysisTest extends CompilerTest {
     str: String,
     extId: Option[UUID @Identifier]
   ): DependencyInfo.Type = {
-    DependencyInfo.Type.Dynamic(
+    new DependencyInfo.Type.Dynamic(
       str,
       extId
     )
@@ -184,7 +182,7 @@ class DataflowAnalysisTest extends CompilerTest {
 
   "Dataflow metadata" should {
     "allow querying for expressions that should be invalidated on change" in {
-      val dependencies = new DependencyMapping
+      val dependencies = DependencyMapping.newBuilder()
       val ids          = List.fill(5)(genStaticDep)
 
       dependencies(ids.head) = Set(ids(1), ids(2))
@@ -201,7 +199,7 @@ class DataflowAnalysisTest extends CompilerTest {
     }
 
     "provide a safe query function as well" in {
-      val dependencies = new DependencyMapping
+      val dependencies = DependencyMapping.newBuilder()
       val ids          = List.fill(5)(genStaticDep)
       val badId        = genStaticDep
 
@@ -224,20 +222,21 @@ class DataflowAnalysisTest extends CompilerTest {
     }
 
     "allow querying only the direct dependents of a node" in {
-      val dependencies = new DependencyMapping
+      val dependencies = DependencyMapping.newBuilder()
       val ids          = List.fill(5)(genStaticDep)
 
       dependencies(ids.head) = Set(ids(1), ids(2))
       dependencies(ids(2))   = Set(ids(3), ids(4))
       dependencies(ids(4))   = Set(ids(1), ids.head)
 
-      dependencies.getDirect(ids.head) shouldEqual Some(Set(ids(1), ids(2)))
-      dependencies.getDirect(ids(2)) shouldEqual Some(Set(ids(3), ids(4)))
-      dependencies.getDirect(ids(4)) shouldEqual Some(Set(ids(1), ids.head))
+      val snapshot = dependencies.build
+      snapshot.getDirect(ids.head) shouldEqual Some(Set(ids(1), ids(2)))
+      snapshot.getDirect(ids(2)) shouldEqual Some(Set(ids(3), ids(4)))
+      snapshot.getDirect(ids(4)) shouldEqual Some(Set(ids(1), ids.head))
     }
 
     "allow for updating the dependents of a node" in {
-      val dependencies = new DependencyMapping
+      val dependencies = DependencyMapping.newBuilder()
       val ids          = List.fill(3)(genStaticDep)
 
       dependencies(ids.head) = Set(ids(1))
@@ -251,7 +250,7 @@ class DataflowAnalysisTest extends CompilerTest {
     }
 
     "allow for updating at a given node" in {
-      val dependencies = new DependencyMapping
+      val dependencies = DependencyMapping.newBuilder()
       val ids          = List.fill(6)(genStaticDep)
       val set1         = Set.from(ids.tail)
       val newId        = genStaticDep
@@ -264,8 +263,8 @@ class DataflowAnalysisTest extends CompilerTest {
     }
 
     "allow combining the information from multiple modules" in {
-      val module1 = new DependencyMapping
-      val module2 = new DependencyMapping
+      val module1 = DependencyMapping.newBuilder()
+      val module2 = DependencyMapping.newBuilder()
 
       val symbol1 = mkDynamicDep("foo")
       val symbol2 = mkDynamicDep("bar")
@@ -281,7 +280,7 @@ class DataflowAnalysisTest extends CompilerTest {
       module2(symbol1) = symbol1DependentIdsInModule2
       module2(symbol3) = symbol3DependentIdsInModule2
 
-      val combinedModule = module1 ++ module2
+      val combinedModule = module1.combine(module2.build)
 
       combinedModule.get(symbol1) shouldBe defined
       combinedModule.get(symbol2) shouldBe defined
