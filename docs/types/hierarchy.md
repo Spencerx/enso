@@ -203,7 +203,6 @@ design documentation.
 >     3.  If either `t` or `q` is a function type but not _both_ `t` and q are
 >         function types, then the relation does not hold.
 >     4.  If both `t` and `q` are function types, then the relation holds if:
->
 >         - If `t` contains defaulted arguments, not present in `q`, then these
 >           can be ignored for the purposes of determining whether `t <: q`. For
 >           example, `f : a -> b = x -> c` is subsumed by `f : a -> c`.
@@ -212,7 +211,6 @@ design documentation.
 >         - For the _return_ position of both `t` and `q`, if it is not a
 >           function type, then `t.ret <: q.ret` (the return position is
 >           covariant). If it is a function type then recurse.
->
 >     5.  If the types have constraints then the constraints must match. A
 >         constraint is simply an application of the `<:` relation.
 >     6.  The types both have the same relevance and visibility (in the
