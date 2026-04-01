@@ -84,6 +84,7 @@
 - [Removing `catch_primitive` from the API][14676]
 - [`polyglot java import` loads classes from HotSpot JVM][14798]
 - [Require opt-in to prefer local libraries][14885]
+- [One log file per execution][14893]
 - [Opt-in to get more detailed logs][14895]
 
 [14480]: https://github.com/enso-org/enso/pull/14480
@@ -93,6 +94,7 @@
 [14676]: https://github.com/enso-org/enso/pull/14676
 [14798]: https://github.com/enso-org/enso/pull/14798
 [14885]: https://github.com/enso-org/enso/pull/14885
+[14893]: https://github.com/enso-org/enso/pull/14893
 [14895]: https://github.com/enso-org/enso/pull/14895
 
 # Enso 2025.3
