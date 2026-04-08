@@ -186,7 +186,7 @@ public final class LogbackSetup extends LoggerSetup {
         if (logPrefix == null) {
           logPrefix = "enso";
         }
-        var projectId = MDC.get("projectId");
+        var projectId = MDC.get("projectLocalId");
         var now = LocalDateTime.now();
         var dateStr = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
         var timeStr = now.format(DateTimeFormatter.ofPattern("HH-mm-ss"));
@@ -234,7 +234,7 @@ public final class LogbackSetup extends LoggerSetup {
       } else {
         fileAppender = new FileAppender<>();
         fileAppender.setName("enso-file");
-        var projectId = MDC.get("projectId");
+        var projectId = MDC.get("projectLocalId");
         DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd");
         String currentDate = LocalDate.now().format(dtf);
         String fullFilePath;

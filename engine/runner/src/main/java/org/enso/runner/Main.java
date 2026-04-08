@@ -1661,10 +1661,20 @@ public class Main {
   }
 
   private void setupLoggingContext(CommandLine line) {
-    if (System.getenv(LanguageServerApi.ENSO_CLOUD_PROJECT_ID_ENV_NAME) != null) {
+    if (line.hasOption(LanguageServerApi.CLOUD_PROJECT_ID_OPTION)) {
+      MDC.put("projectId", line.getOptionValue(LanguageServerApi.CLOUD_PROJECT_ID_OPTION));
+    } else if (System.getenv(LanguageServerApi.ENSO_CLOUD_PROJECT_ID_ENV_NAME) != null) {
       MDC.put("projectId", System.getenv(LanguageServerApi.ENSO_CLOUD_PROJECT_ID_ENV_NAME));
-    } else if (line.hasOption(LanguageServerApi.PROJECT_ID_OPTION)) {
-      MDC.put("projectId", line.getOptionValue(LanguageServerApi.PROJECT_ID_OPTION));
+    }
+    if (System.getenv(LanguageServerApi.ENSO_CLOUD_PROJECT_ID_ENV_NAME) != null) {
+      // In hybrid projects, the cloud project ID has precedence over the local project ID
+      // because Cloud does not store the local project ID, and it is generated every time the
+      // project is started.
+      MDC.put("projectLocalId", System.getenv(LanguageServerApi.ENSO_CLOUD_PROJECT_ID_ENV_NAME));
+    } else if (System.getenv(LanguageServerApi.ENSO_LOCAL_PROJECT_ID_ENV_NAME) != null) {
+      MDC.put("projectLocalId", System.getenv(LanguageServerApi.ENSO_LOCAL_PROJECT_ID_ENV_NAME));
+    } else if (line.getOptionValue(LanguageServerApi.PROJECT_ID_OPTION) != null) {
+      MDC.put("projectLocalId", line.getOptionValue(LanguageServerApi.PROJECT_ID_OPTION));
     }
     if (line.hasOption(LanguageServerApi.CLOUD_PROJECT_SESSION_ID_OPTION)) {
       MDC.put(
@@ -1674,6 +1684,10 @@ public class Main {
       MDC.put(
           "projectSessionId",
           System.getenv(LanguageServerApi.ENSO_CLOUD_PROJECT_SESSION_ID_ENV_NAME));
+    } else if (System.getenv(LanguageServerApi.ENSO_LOCAL_PROJECT_SESSION_ID_ENV_NAME) != null) {
+      MDC.put(
+          "projectSessionId",
+          System.getenv(LanguageServerApi.ENSO_LOCAL_PROJECT_SESSION_ID_ENV_NAME));
     }
   }
 
