@@ -26,6 +26,8 @@
 - [A comment can be attached to the asset version][14923]
 - [New tabular view of session log with filtering][14953]
 - [Input ports no longer highlight on hover unless being connected to][14968]
+- [Usage page with cloud executions statistics available for Team users in
+  Settings][14952]
 - Minimum supported macOS version is now 12 (Monterey); Electron 41 no longer
   runs on Big Sur.
 
@@ -44,6 +46,7 @@
 [14823]: https://github.com/enso-org/enso/pull/14823
 [14953]: https://github.com/enso-org/enso/pull/14953
 [14968]: https://github.com/enso-org/enso/pull/14968
+[14952]: https://github.com/enso-org/enso/pull/14952
 
 #### Enso Standard Library
 
