@@ -79,7 +79,24 @@ async function mockElectronApi(page: Page) {
             chrome: 'MOCK-chrome-version',
           },
           ai: {
-            generateComponent: async () => ({ ok: true, value: { body: 'operator1' } }),
+            generateComponent: async (request: { context: { sourceIdentifier?: string } }) => {
+              const src = request.context.sourceIdentifier
+              const value =
+                src != null ?
+                  {
+                    functionName: 'ai_helper',
+                    argumentNames: ['input'],
+                    body: `result = input\nresult`,
+                    callArguments: [src],
+                  }
+                : {
+                    functionName: 'ai_helper',
+                    argumentNames: [],
+                    body: `result = 42\nresult`,
+                    callArguments: [],
+                  }
+              return { result: { ok: true, value }, usage: null }
+            },
           },
         }, // satisfies import('$/electronApi').ElectronApi,
       })

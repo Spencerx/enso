@@ -325,12 +325,8 @@ async function acceptAiInput() {
   // open so the user sees the spinner instead of being dismissed by a second Enter.
   if (input.mode.mode !== 'aiPrompt' || input.processingAIPrompt) return
   const result = await input.applyAIPrompt()
-  if (result != null && result.ok && input.selfArgument != null) {
-    emit('acceptedAi', {
-      prompt: input.mode.prompt,
-      body: result.value.body,
-      sourceIdentifier: input.selfArgument,
-    })
+  if (result != null && result.ok) {
+    emit('acceptedAi', { prompt: input.mode.prompt, response: result.value })
   } else {
     emit('canceled')
   }
