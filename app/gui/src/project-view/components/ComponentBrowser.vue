@@ -10,6 +10,7 @@ import { type Typename } from '$/providers/openedProjects/suggestionDatabase/ent
 import { debouncedGetter } from '$/utils/reactivity'
 import { componentBrowserBindings, listBindings } from '@/bindings'
 import ActionButton from '@/components/ActionButton.vue'
+import { useAiToolHandler } from '@/components/ComponentBrowser/aiToolHandler'
 import type { Component } from '@/components/ComponentBrowser/component'
 import ComponentEditor from '@/components/ComponentBrowser/ComponentEditor.vue'
 import ComponentList from '@/components/ComponentBrowser/ComponentList.vue'
@@ -185,6 +186,8 @@ const selectedSuggestion = computed(() => {
 // === Input and Filtering ===
 
 const input = useComponentBrowserInput()
+
+useAiToolHandler()
 
 onUnmounted(() => {
   graphStore.cbEditedEdge = undefined

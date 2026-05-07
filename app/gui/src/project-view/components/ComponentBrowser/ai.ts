@@ -1,6 +1,7 @@
 import { useGraphStore, useProjectNames } from '$/components/WithCurrentProject.vue'
 import type { GraphStore } from '$/providers/openedProjects/graph'
 import type { ProjectNameStore } from '$/providers/openedProjects/projectNames'
+import { Ast } from '@/util/ast'
 import type {
   AiComponentRequest,
   AiComponentResponse,
@@ -10,9 +11,8 @@ import type {
 import { Err, Ok, withContext, type Result } from 'enso-common/src/utilities/data/result'
 
 /**
- * Resolves Component Browser AI prompts by invoking the local Claude agent hosted in
- * the Electron main process over IPC. The agent generates a top-level User Defined
- * Component plus a call placed in the current method.
+ * Resolves Component Browser AI prompts by invoking the local Claude agent in the Electron main
+ * process. Returns the generated User Defined Component plus its call site.
  */
 export function useAI(
   graphStore: GraphStore = useGraphStore(),
@@ -40,6 +40,14 @@ export function useAI(
     const currentMethodName = graphStore.currentMethod.pointer.value.name
     const currentMethodCode = currentMethodAst.code()
 
+    const moduleImports: string[] = []
+    const moduleRoot = currentMethodAst.module.root()
+    if (moduleRoot instanceof Ast.BodyBlock) {
+      for (const statement of moduleRoot.statements()) {
+        if (statement instanceof Ast.Import) moduleImports.push(statement.code())
+      }
+    }
+
     const inScopeBindings: AiInScopeBinding[] = []
     for (const [, ports] of graphDb.nodeOutputPorts.allForward()) {
       for (const portId of ports) {
@@ -58,6 +66,7 @@ export function useAI(
       currentMethodName,
       currentMethodCode,
       inScopeBindings,
+      moduleImports,
     })
   }
 
@@ -78,9 +87,7 @@ export function useAI(
         if (!context.ok) return context
         const reply = await electronApi.ai.generateComponent({ prompt, context: context.value })
         logUsage(reply.usage)
-        // Electron IPC uses structured clone, which strips the `ResultError` prototype —
-        // `reply.result.error` comes back as a plain `{ payload, context }` object without its
-        // `.message()` method. Rebuild a proper `Result` on this side of the boundary.
+        // Electron's structured clone strips the `ResultError` prototype, so rebuild it here.
         return reply.result.ok ? Ok(reply.result.value) : Err(reply.result.error.payload)
       },
     )

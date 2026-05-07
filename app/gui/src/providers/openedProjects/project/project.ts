@@ -251,7 +251,7 @@ export function createProjectStore(
     expressionId: ExternalId,
     expression: string,
   ): Promise<Result<any> | null> {
-    return runExecuteExpressionSlot(expressionId, expression, null)
+    return runExecuteExpressionSlot(expressionId, expression, null).then(parseVisualizationData)
   }
 
   function queuedExecuteExpression(
@@ -259,21 +259,35 @@ export function createProjectStore(
     expression: string,
     timeoutMs: number = 5000,
   ): Promise<Result<unknown> | null> {
+    return runExecuteExpressionSlot(expressionId, expression, timeoutMs).then(
+      parseVisualizationData,
+    )
+  }
+
+  /**
+   * Variant of {@link queuedExecuteExpression} that returns the raw decoded text the LS produced
+   * (no JSON parsing). Failure semantics match {@link queuedExecuteExpression}.
+   */
+  function queuedExecuteExpressionRaw(
+    expressionId: ExternalId,
+    expression: string,
+    timeoutMs: number = 5000,
+  ): Promise<Result<string> | null> {
     return runExecuteExpressionSlot(expressionId, expression, timeoutMs)
   }
 
   /**
-   * Shared implementation for {@link executeExpression} and
-   * {@link queuedExecuteExpression}. If `timeoutMs` is `null`, wait
-   * indefinitely for the slot to terminate; otherwise reject with a timeout
-   * error once the deadline passes. Either way the slot is removed from the
-   * subdoc before the returned promise settles.
+   * Shared implementation for {@link executeExpression},
+   * {@link queuedExecuteExpression}, and {@link queuedExecuteExpressionRaw}. If
+   * `timeoutMs` is `null`, wait indefinitely for the slot to terminate;
+   * otherwise resolve with `Err(timeout)` once the deadline passes. Either way
+   * the slot is removed from the subdoc before the returned promise settles.
    */
   function runExecuteExpressionSlot(
     expressionId: ExternalId,
     expression: string,
     timeoutMs: number | null,
-  ): Promise<Result<any> | null> {
+  ): Promise<Result<string> | null> {
     const visDoc = projectModel.visualizationsDoc
     if (!visDoc) {
       // Subdoc not yet synced. Callers today retry by waiting for UI
@@ -302,20 +316,20 @@ export function createProjectStore(
   }
 
   /**
-   * Observe slot `requestId` until it lands in `ready` (-> decode response
-   * bytes as UTF-8 JSON -> `Ok(parsed)`) or `failed` (-> `Err(message)`).
-   * Honors an optional timeout deadline.
+   * Observe slot `requestId` until it lands in a terminal state: `ready` → `Ok(text)` (UTF-8
+   * decoded), `failed` → `Err(message)`, timeout → `Err(timeout)`. Always resolves; rejection
+   * is reserved for catastrophic failures.
    */
   function awaitExecuteSlot(
     vis: Visualizations,
     requestId: VisRequestId,
     timeoutMs: number | null,
-  ): Promise<Result<any> | null> {
-    return new Promise<Result<any> | null>((resolve, reject) => {
+  ): Promise<Result<string> | null> {
+    return new Promise<Result<string> | null>((resolve) => {
       let unobserve: (() => void) | null = null
       let timer: ReturnType<typeof setTimeout> | null = null
 
-      const finish = (value: Result<any> | null, err?: unknown) => {
+      const finish = (value: Result<string> | null) => {
         if (unobserve) {
           unobserve()
           unobserve = null
@@ -324,8 +338,7 @@ export function createProjectStore(
           clearTimeout(timer)
           timer = null
         }
-        if (err != null) reject(err)
-        else resolve(value)
+        resolve(value)
       }
 
       const commitTerminal = (view: VisualizationSlotView): boolean => {
@@ -337,7 +350,7 @@ export function createProjectStore(
           }
           try {
             const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
-            finish(parseVisualizationData(Ok(text)))
+            finish(Ok(text))
           } catch (e) {
             finish(Err(`Failed to decode visualization response: ${e}`))
           }
@@ -345,7 +358,7 @@ export function createProjectStore(
         }
         if (view.status === 'failed') {
           const message = view.failure?.message ?? 'Visualization evaluation failed'
-          finish(null, Err(message))
+          finish(Err(message))
           return true
         }
         return false
@@ -364,7 +377,7 @@ export function createProjectStore(
 
       if (timeoutMs != null) {
         timer = setTimeout(() => {
-          finish(null, Err('executeExpression: Execution timed out.'))
+          finish(Err('executeExpression: Execution timed out.'))
         }, timeoutMs)
       }
     })
@@ -439,6 +452,7 @@ export function createProjectStore(
     dataflowErrors,
     executeExpression,
     queuedExecuteExpression,
+    queuedExecuteExpressionRaw,
     renameProject,
   })
 }

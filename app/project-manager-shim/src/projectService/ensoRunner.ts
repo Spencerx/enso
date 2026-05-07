@@ -672,6 +672,23 @@ export function findEnsoExecutable(workDir: string = '.'): Path | undefined {
 }
 
 /**
+ * Bundled engine's `lib/Standard` directory, derived from the engine binary's location.
+ * `undefined` when the binary cannot be located or the derived directory does not exist.
+ */
+export function findStdlibRoot(workDir: string = '.'): Path | undefined {
+  const ensoPath = findEnsoExecutable(workDir)
+  if (!ensoPath) return undefined
+  const engineRoot = path.dirname(path.dirname(ensoPath))
+  const stdlib = path.join(engineRoot, 'lib', 'Standard')
+  try {
+    fs.accessSync(stdlib)
+  } catch {
+    return undefined
+  }
+  return Path(stdlib)
+}
+
+/**
  * Downloads the latest Enso engine from GitHub.
  *
  * This function automatically detects the current platform (macOS, Linux, or Windows)

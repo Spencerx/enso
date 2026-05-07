@@ -1,18 +1,13 @@
 /**
- * @file Electron-main-side adapter that drives a long-lived `claude` CLI subprocess to generate
- * the body of a User Defined Component from a natural-language prompt. Exposed to the renderer
- * via IPC; the renderer never invokes the CLI directly.
+ * @file Drives a long-lived `claude` CLI subprocess that generates User Defined Component bodies
+ * from natural-language prompts. Authentication rides on whatever the CLI is already configured
+ * with — the main process never reads the API key directly.
  *
- * The session is spawned eagerly (but non-blockingly) at app launch, primed with a small
- * acknowledgment turn so the system prompt is ingested before the first real request, and
- * serialized via a per-process FIFO queue. Crashes are logged and the child is respawned in the
- * background; per-request timeouts return errors without killing the still-warm child.
- *
- * Authentication rides on whatever the `claude` CLI is already configured with. The main process
- * does not require or read the API key beyond forwarding the parent environment.
+ * Lifecycle, queueing, crash handling, and the stream-json wire format are documented in
+ * `electron-client/CLAUDE.md`.
  */
 import spawn from 'cross-spawn'
-import { ipcMain } from 'electron'
+import { ipcMain, type WebContents } from 'electron'
 import {
   aiComponentResponseSchema,
   type AiComponentIpcReply,
@@ -28,16 +23,34 @@ import {
 import { Err, Ok } from 'enso-common/src/utilities/data/result'
 import readline from 'node:readline'
 import { z } from 'zod'
+import { startAiMcpServer, type AiMcpServer } from './aiMcpServer.js'
 import { Channel } from './ipc.js'
 
 const CLAUDE_EXECUTABLE = 'claude'
-const REQUEST_TIMEOUT_MS = 120_000
+// Tool round-trips (filesystem reads, MCP `evaluateExpression` calls) eat the budget fast — a
+// single turn can do half a dozen sub-second LS queries on top of the model's own output. The
+// pre-tools value was 120s; tripled with headroom for the worst-case fan-out.
+const REQUEST_TIMEOUT_MS = 360_000
 const PRIMING_TIMEOUT_MS = 60_000
 const STDERR_TAIL_CHARS = 2_000
 const RESPAWN_WINDOW_MS = 30_000
 const MAX_RESPAWNS_IN_WINDOW = 3
 const PRIMING_PROMPT =
   'Acknowledge readiness with the single word READY. This is a session warm-up; do not return JSON.'
+
+/** Configuration for the long-lived `claude` session. */
+export interface ClaudeSessionConfig {
+  /**
+   * Bundled engine's `lib/Standard` directory, exposed to the agent via `--add-dir` plus the
+   * `Read`/`Glob`/`Grep` tools. `undefined` disables stdlib filesystem access.
+   */
+  readonly stdlibRoot: string | undefined
+  /**
+   * Config file produced by {@link AiMcpServer.start}, exposing the `evaluateExpression` tool.
+   * `undefined` runs the agent without MCP (used by headless tests).
+   */
+  readonly mcpConfigPath: string | undefined
+}
 
 // =====================
 // === System prompt ===
@@ -53,19 +66,36 @@ Syntax essentials:
 - Comments start with \`#\` and are rare in generated code.
 - Blocks: indented lines belonging to the same statement.
 - Qualified names: \`Standard.Base.Data.Vector.Vector.new\`.
+- Constructors: a type holds its constructors. Build a value with \`Type.Constructor args\` (e.g. \`Constant_Column.Value "x"\`) — a bare type name isn't callable unless it has a single constructor sharing its name. The shorthand \`..Constructor args\` (autoscope) only resolves when the surrounding parameter's expected type is a *single* type with that constructor; for parameters typed as a union (\`A | B | C\`) use the qualified \`Type.Constructor\` form.
+- Conversions: many wide-input methods accept several source types via \`Target.from (that:Source)\` conversion methods on the target — when the parameter is a union, passing a value of any accepted source type lets the engine coerce it, no wrapper needed.
 Common stdlib entry points (Standard.Base / Standard.Table):
 - \`Vector.new count fn\`, \`Vector.filter\`, \`Vector.map\`, \`Vector.reduce\`.
 - \`Table.filter\`, \`Table.select_columns\`, \`Table.sort\`, \`Table.aggregate\`.
 - \`Text.contains\`, \`Text.starts_with\`, \`Text.split\`.
 - \`Data.read path\`, \`Data.write path value\`.`
 
-const SYSTEM_PROMPT = `\
+function buildSystemPrompt(config: ClaudeSessionConfig): string {
+  const toolLines: string[] = []
+  if (config.stdlibRoot != null) {
+    toolLines.push(
+      `- \`Read\`, \`Glob\`, and \`Grep\` against the Enso standard library at \`${config.stdlibRoot}\`. Prefer reading the actual \`.enso\` source files when in doubt about a function's exact name, signature, or available overloads — your built-in cheat sheet is incomplete. Stay inside that directory; do not attempt to read anything else.`,
+    )
+  }
+  if (config.mcpConfigPath != null) {
+    toolLines.push(
+      '- `evaluateExpression(expression)` — evaluate a plain Enso expression in the same scope your generated `body` would run in. Every in-scope binding listed below is referenceable by name. **The expression must evaluate to Text** (the transport sends raw bytes back as text); pick the encoding yourself with `.to_text`, `.to_display_text`, or `.to_json` depending on what is most useful. For non-Text producers wrap the call: `<binding>.column_names.to_json` (JSON array of column names), `(<binding>.first.to_text).take 200` (preview a value), `(<binding>.row_count).to_text` (a single number), `(cards.join leader_order on=["Set"]).column_names.to_json` (JSON array, schema check). Expressions that may produce a DataflowError need an explicit catch: `((<expr>).catch_primitive (e -> e.to_display_text))` — otherwise the call comes back with the dataflow error wrapped in an actionable hint, not the value you wanted. Each call is a real LS round-trip — pick what you need, don\'t fan out.',
+    )
+  }
+  const toolsSection =
+    toolLines.length > 0 ? `\n\nTools you have available:\n${toolLines.join('\n')}` : ''
+  return `\
 You generate a top-level User Defined Component in Enso — a function definition plus the call that places it inside an existing method on the user's graph.
 
-${ENSO_CHEAT_SHEET}
+${ENSO_CHEAT_SHEET}${toolsSection}
 
 You will receive:
 - The Enso method the call site lives in (its name and full source).
+- The list of \`import\` / \`from … import …\` statements already at the top of the module. Names brought in by these imports are resolvable unqualified; everything else needs a fully qualified name (you cannot add new imports — your only output is the function definition + call). When the surrounding call site is unambiguous about the expected type, the \`..Constructor\` autoscope shorthand avoids long qualified names — see the cheat sheet above for when this applies vs. when you must use \`Type.Constructor\` or rely on a \`Target.from (that:Source)\` conversion.
 - Optionally a source binding the user dropped into the AI prompt (identifier and Enso type, when known) — when present, this is the value they want to operate on.
 - Other identifiers already in scope in that method, with their Enso types when known. You may reference any of them.
 - A natural-language description of what the new component should do.
@@ -77,12 +107,13 @@ You must return a JSON object with these four fields and nothing else (no prose,
 - \`callArguments\`: Enso expressions passed at the call site, one per parameter and in the same order as \`argumentNames\`. Each entry is usually just an in-scope identifier (the source binding or one of the other in-scope bindings), but any single Enso expression is accepted. The renderer wraps them as \`Main.<functionName> <callArguments[0]> <callArguments[1]> ...\`. When a source binding is provided, pass it as a call argument if the function operates on it; pass other in-scope identifiers only when the function uses them. The function may also take no parameters at all if it doesn't depend on anything in scope.
 
 Rules:
-- At most one method call per line in \`body\`; split chained calls across lines using intermediate bindings. This keeps each step readable as a graph node.
+- Do not chain method calls on a single line — every line in \`body\` should be at most one outer call so each step shows up as its own graph node. Avoid \`x.foo y . bar z\` and \`x.foo.bar\`; bind the intermediate result to a name and call \`.bar\` on the next line. **Calls inside arguments are fine** — write small constructors and helpers directly as arguments rather than naming intermediates for them, e.g. \`table.filter "age" (..Greater 18)\` is one call, not two (the inner \`..Greater 18\` is an autoscoped \`Filter_Condition\` argument, not a chain).
 - The final line of \`body\` must be a single identifier — assign expressions to a name first and reference that name.
 - \`argumentNames\` and \`callArguments\` must have the same length.
 - Return only valid Enso — avoid placeholders, pseudocode, or commentary.
 
 If the user message is a session warm-up and the request is not for a component, reply briefly in plain text. Otherwise, every reply must be the JSON object described above.`
+}
 
 // =================
 // === Prompt IO ===
@@ -98,6 +129,8 @@ function buildUserPrompt(request: AiComponentRequest): string {
     formatBinding(binding.identifier, binding.typeName),
   )
   const otherBindingsList = otherBindings.length > 0 ? otherBindings.join('\n') : '(none)'
+  const moduleImportsList =
+    context.moduleImports.length > 0 ? context.moduleImports.join('\n') : '(none)'
   const sourceSection =
     context.sourceIdentifier != null ?
       `Source binding (the value the user wants to operate on):
@@ -110,6 +143,9 @@ Current method source:
 \`\`\`
 ${context.currentMethodCode}
 \`\`\`
+
+Module imports (already in scope without qualification):
+${moduleImportsList}
 
 ${sourceSection}Other in-scope bindings:
 ${otherBindingsList}
@@ -139,7 +175,17 @@ function truncateStderr(stderr: string): string {
 // child exits 1 immediately with "When using --print, --output-format=stream-json requires
 // --verbose"). The extra system/init and rate_limit_event envelopes the verbose output emits
 // are filtered out by the schema-based parser in `onStdoutLine`.
-function streamJsonArgs(): string[] {
+//
+// `--add-dir <stdlib>` plus `--allowedTools "Read,Glob,Grep"` lets the model browse the bundled
+// standard library when it's unsure of an API. We pre-grant those tools (`--allowedTools`) so the
+// CLI doesn't try to prompt — there's no UI to prompt against in `-p` mode.
+function streamJsonArgs(config: ClaudeSessionConfig): string[] {
+  // MCP tools are namespaced as `mcp__<server>__<tool>`. Conditional so a tool-less session
+  // (e.g. headless tests) doesn't claim capabilities to the model.
+  const allowedTools = [
+    ...(config.stdlibRoot != null ? ['Read', 'Glob', 'Grep'] : []),
+    ...(config.mcpConfigPath != null ? ['mcp__enso__evaluateExpression'] : []),
+  ]
   return [
     '-p',
     '--input-format',
@@ -148,9 +194,14 @@ function streamJsonArgs(): string[] {
     'stream-json',
     '--verbose',
     '--system-prompt',
-    SYSTEM_PROMPT,
-    '--tools',
-    '',
+    buildSystemPrompt(config),
+    ...(config.stdlibRoot != null ? ['--add-dir', config.stdlibRoot] : []),
+    // `--strict-mcp-config` makes the CLI ignore project- and user-level MCP configs so the
+    // session is hermetic and only sees our in-process server.
+    ...(config.mcpConfigPath != null ?
+      ['--mcp-config', config.mcpConfigPath, '--strict-mcp-config']
+    : []),
+    ...(allowedTools.length > 0 ? ['--allowedTools', allowedTools.join(',')] : []),
     '--setting-sources',
     '',
     '--no-session-persistence',
@@ -206,6 +257,8 @@ interface TurnOutcome {
 interface PendingTurn {
   resolve: (outcome: TurnOutcome) => void
   textChunks: string[]
+  // Pinned per turn (not per session) so crash/shutdown drop the slot for free; `null` for priming.
+  sender: WebContents | null
 }
 
 // ============================
@@ -213,12 +266,12 @@ interface PendingTurn {
 // ============================
 
 /**
- * Owns a single long-lived `claude` subprocess. Construction kicks off the spawn + priming flow
- * without awaiting either, so callers can run the constructor synchronously during Electron
- * startup. `runRequest` awaits priming via `this.ready`. The child is auto-respawned on
- * unexpected exit (subject to a crash-loop guard); `shutdown()` SIGTERMs it permanently.
+ * Owns a single long-lived `claude` subprocess: spawn + priming run in the background, requests
+ * serialize through a FIFO queue, and the child is auto-respawned on unexpected exit (with a
+ * crash-loop guard).
  */
 export class ClaudeAgentSession {
+  private readonly config: ClaudeSessionConfig
   private readonly watcher: WatchedChildProcess
   private readyDeferred: Deferred<void> = createDeferred()
   private readonly queue = new AsyncQueue<void>(Promise.resolve())
@@ -227,8 +280,9 @@ export class ClaudeAgentSession {
   private stderrTail = ''
   private disposed = false
 
-  /** Spawn the child, kick off priming, and start serving requests. */
-  constructor() {
+  /** Spawn the child eagerly and kick off the priming turn in the background. */
+  constructor(config: ClaudeSessionConfig) {
+    this.config = config
     // Attach a no-op rejection handler so that a crash mid-priming doesn't surface as an
     // unhandled rejection when no `runRequest` happens to be awaiting `ready` at the time.
     // Awaiters that arrive later attach their own .then/.catch and still observe the rejection.
@@ -238,7 +292,7 @@ export class ClaudeAgentSession {
       // npm wraps the package's bin entry as `claude.cmd`, which Node's `spawn` won't resolve
       // without `shell: true`. cross-spawn handles `.cmd`/`.ps1` lookup on Windows, no-op on POSIX.
       () =>
-        spawn(CLAUDE_EXECUTABLE, streamJsonArgs(), {
+        spawn(CLAUDE_EXECUTABLE, streamJsonArgs(this.config), {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: process.env,
         }),
@@ -255,23 +309,41 @@ export class ClaudeAgentSession {
     })
   }
 
-  /** Resolves once the current child has spawned and accepted a priming turn. */
+  /** Resolves once the current child has spawned and accepted the priming turn. */
   get ready(): Promise<void> {
     return this.readyDeferred.promise
   }
 
+  /**
+   * Renderer that originated the in-flight turn, or `null` between turns or after the renderer
+   * was destroyed mid-turn. Read by the MCP server to dispatch tool calls back to the right window.
+   */
+  get activeSender(): WebContents | null {
+    const pending = this.pending
+    if (pending == null) return null
+    const sender = pending.sender
+    if (sender == null || sender.isDestroyed()) return null
+    return sender
+  }
+
   /** Run an AI component request through the long-lived session. */
-  runRequest(request: AiComponentRequest): Promise<AiComponentIpcReply> {
+  runRequest(request: AiComponentRequest, sender: WebContents): Promise<AiComponentIpcReply> {
     return new Promise<AiComponentIpcReply>((resolveOuter) => {
+      if (sender.isDestroyed()) {
+        resolveOuter({
+          result: Err('Renderer was destroyed before the AI request could be handled'),
+          usage: null,
+        })
+        return
+      }
       this.queue.pushTask(async () => {
         if (this.disposed) {
           resolveOuter({ result: Err('Claude agent has been shut down'), usage: null })
           return
         }
         if (this.watcher.respawnSuspended && !this.watcher.current?.alive) {
-          // The crash-loop guard tripped; the watcher is waiting for a manual respawn. The
-          // watcher does NOT clear its recent-exits buffer on respawn() — another quick crash
-          // trips the guard again immediately, instead of granting an infinite retry stream.
+          // The watcher's recent-exits buffer is preserved across respawn(), so a quick re-crash
+          // trips the guard again and we don't loop indefinitely.
           this.readyDeferred = createDeferred()
           this.readyDeferred.promise.catch(() => undefined)
           await this.watcher.respawn()
@@ -285,7 +357,7 @@ export class ClaudeAgentSession {
           })
           return
         }
-        const turn = await this.runOneTurn(buildUserPrompt(request), REQUEST_TIMEOUT_MS)
+        const turn = await this.runOneTurn(buildUserPrompt(request), REQUEST_TIMEOUT_MS, sender)
         resolveOuter(this.replyFromTurn(turn))
       })
     })
@@ -311,7 +383,7 @@ export class ClaudeAgentSession {
   // -------------- private --------------
 
   private onChildStarted(handle: ChildProcessHandle): void {
-    this.contextBytes = Buffer.byteLength(SYSTEM_PROMPT, 'utf8')
+    this.contextBytes = Buffer.byteLength(buildSystemPrompt(this.config), 'utf8')
     this.stderrTail = ''
     this.pending = null
 
@@ -364,7 +436,7 @@ export class ClaudeAgentSession {
   }
 
   private async prime(): Promise<void> {
-    const outcome = await this.runOneTurn(PRIMING_PROMPT, PRIMING_TIMEOUT_MS)
+    const outcome = await this.runOneTurn(PRIMING_PROMPT, PRIMING_TIMEOUT_MS, null)
     if (outcome.state !== 'completed') {
       throw new Error(`priming turn ${outcome.state}: ${outcome.errorReason ?? '(no detail)'}`)
     }
@@ -373,7 +445,11 @@ export class ClaudeAgentSession {
     }
   }
 
-  private runOneTurn(content: string, timeoutMs: number): Promise<TurnOutcome> {
+  private runOneTurn(
+    content: string,
+    timeoutMs: number,
+    sender: WebContents | null,
+  ): Promise<TurnOutcome> {
     return new Promise<TurnOutcome>((resolveTurn) => {
       const handle = this.watcher.current
       const child = handle?.child
@@ -394,6 +470,7 @@ export class ClaudeAgentSession {
           resolveTurn(outcome)
         },
         textChunks: [],
+        sender,
       }
       this.pending = pending
       const timeoutHandle = setTimeout(() => {
@@ -511,16 +588,42 @@ export class ClaudeAgentSession {
 // ===================
 
 let session: ClaudeAgentSession | null = null
+let mcpServer: AiMcpServer | null = null
 
-/** Register the {@link Channel.generateAiComponent} IPC handler. */
-export function initClaudeAgentIpc() {
-  // Eager but non-blocking: spawning + priming happen in the background while Electron continues
-  // its own startup. Subsequent IPC calls await `session.ready` before sending stdin.
-  if (session == null) session = new ClaudeAgentSession()
+/**
+ * Start the in-process MCP server that exposes `evaluateExpression` to the agent. Returns the
+ * config file path to pass into {@link initClaudeAgentIpc}, or `undefined` if startup failed.
+ */
+export async function initAiMcpServer(): Promise<string | undefined> {
+  try {
+    const started = await startAiMcpServer(() => session?.activeSender ?? null)
+    mcpServer = started.server
+    console.info(`[AI] MCP server config at ${started.mcpConfigPath}`)
+    return started.mcpConfigPath
+  } catch (err) {
+    console.warn(
+      `[AI] failed to start in-process MCP server; the agent will run without the evaluateExpression tool:`,
+      err,
+    )
+    return undefined
+  }
+}
+
+/**
+ * Spawn the long-lived agent session and register the {@link Channel.generateAiComponent} IPC
+ * handler. Pass `mcpConfigPath` from {@link initAiMcpServer} (or `undefined` to disable MCP).
+ */
+export function initClaudeAgentIpc(config: ClaudeSessionConfig): void {
+  if (config.stdlibRoot == null) {
+    console.warn(
+      `[AI] could not locate the bundled engine's lib/Standard directory; the agent will run without stdlib filesystem access.`,
+    )
+  } else {
+    console.info(`[AI] stdlib filesystem access at ${config.stdlibRoot}`)
+  }
+  if (session == null) session = new ClaudeAgentSession(config)
   const currentSession = session
-  // One-time startup diagnostic. The session's first `ready` rejection carries the original
-  // ErrnoException (synchronous spawner throws via `firstSpawn`; async 'error' events via the
-  // child handle), so we can detect a missing CLI without spawning a separate `--version` probe.
+  // Surface a missing-CLI hint via the first `ready` rejection — saves spawning a `--version` probe.
   void currentSession.ready.catch((err) => {
     const errno = err as NodeJS.ErrnoException | null
     if (errno?.code === 'ENOENT') {
@@ -535,13 +638,17 @@ export function initClaudeAgentIpc() {
   })
   ipcMain.handle(
     Channel.generateAiComponent,
-    async (_event, request: AiComponentRequest): Promise<AiComponentIpcReply> =>
-      currentSession.runRequest(request),
+    async (event, request: AiComponentRequest): Promise<AiComponentIpcReply> =>
+      currentSession.runRequest(request, event.sender),
   )
 }
 
-/** Tear down the long-lived session. Wired to `app.on('before-quit', ...)` in `index.ts`. */
+/** Tear down the long-lived session and MCP server. Wired to `app.on('before-quit', ...)`. */
 export function shutdownClaudeAgent(): void {
   session?.shutdown()
   session = null
+  if (mcpServer != null) {
+    void mcpServer.shutdown()
+    mcpServer = null
+  }
 }
