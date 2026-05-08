@@ -20,6 +20,12 @@
  * inputs in the layout below. The spec skips silently when the env var is unset; per-test skips
  * fire when that test's specific files are missing under the path.
  *
+ * Optional: `ENSO_AI_CHALLENGES_METRICS_DIR=/abs/path` enables effectiveness telemetry. On a
+ * successful run the test appends one CSV row to `<dir>/<sanitized-test-name>.csv` summarizing
+ * the run (timestamp, current commit SHA or `WIP` if dirty, per-AI-node durations, hop count,
+ * the full `usage` breakdown — input / cache_read / cache_creation / output tokens — and the
+ * last-hop `contextTokens`). See `./aiMetrics.ts` for the schema.
+ *
  * Expected layout under $ENSO_TEST_AI_CHALLENGES_DIR (flat — files at the top level):
  *   Gym Leader Set Cards.xlsx          # week 32; 3 sheets: Trainer Cards, Pokemon Cards, Leader Order
  *   Pokemon Input.xlsx                 # week 32; 2 sheets, only `Pokemon` is used
@@ -31,9 +37,11 @@
  * rename the sheets/files to opaque labels like `input1`.
  */
 
+import type { RequestUsage } from 'enso-common/src/ai'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { expect, type Page } from 'playwright/test'
+import { expect, type Page, type TestInfo } from 'playwright/test'
+import { appendMetricsRow, collectAiUsage, gitCommitTag } from './aiMetrics'
 import {
   closeWelcome,
   createNewProject,
@@ -43,8 +51,25 @@ import {
 } from './electronTest'
 
 const DATASETS_DIR = process.env.ENSO_TEST_AI_CHALLENGES_DIR
+const METRICS_DIR = process.env.ENSO_AI_CHALLENGES_METRICS_DIR
 const AI_PROMPT_TIMEOUT_MS = 240_000
 const MANUAL_NODE_TIMEOUT_MS = 30_000
+
+// `app/electron-client/tests/aiChallengePrep.spec.ts` → repo root is three `..` up, matching
+// the `POSSIBLE_ELECTRON_PATHS` pattern in `electronTest.ts`. Used as the cwd for `git` so
+// commit-tag resolution works regardless of where the test runner is invoked from.
+const REPO_ROOT = path.resolve(import.meta.dirname, '../../..')
+
+async function recordSuccess(testInfo: TestInfo, samples: readonly RequestUsage[]) {
+  if (!METRICS_DIR) return
+  await appendMetricsRow({
+    dir: METRICS_DIR,
+    testName: testInfo.title,
+    samples,
+    commit: await gitCommitTag(REPO_ROOT),
+    timestamp: new Date().toISOString(),
+  })
+}
 
 const WEEK_32_FILES = {
   cardsWorkbook: 'Gym Leader Set Cards.xlsx',
@@ -181,12 +206,13 @@ async function runAIPromptOnLastNode(page: Page, prompt: string, expectedNodeCou
 
 test("Preppin' Data week 32 — Pokemon Card Organising (stdlib-read isolation)", async ({
   page,
-}) => {
+}, testInfo) => {
   // 9 AI calls × up to 240s each, plus 4 manual source nodes and the final visualization. The
   // 3-minute playwright default is far too short; budget 45 min so a hang fails fast without
   // squeezing the worst-case happy path.
   test.setTimeout(45 * 60_000)
   const files = await resolveDataFiles(WEEK_32_FILES)
+  const usage = collectAiUsage(page)
   await loginAsTestUser(page)
   await closeWelcome(page)
   await createNewProject(page)
@@ -260,14 +286,16 @@ test("Preppin' Data week 32 — Pokemon Card Organising (stdlib-read isolation)"
   await expect(page.getByText('Total Row Count: 252')).toBeVisible({
     timeout: MANUAL_NODE_TIMEOUT_MS,
   })
+  await recordSuccess(testInfo, usage.samples)
 })
 
 test("Preppin' Data week 51 — Strictly Positive Improvements (value-probe isolation)", async ({
   page,
-}) => {
+}, testInfo) => {
   // 6 AI calls × up to 240s each, plus the manual source node and the final visualization.
   test.setTimeout(30 * 60_000)
   const files = await resolveDataFiles(WEEK_51_FILES)
+  const usage = collectAiUsage(page)
   await loginAsTestUser(page)
   await closeWelcome(page)
   await createNewProject(page)
@@ -312,4 +340,5 @@ test("Preppin' Data week 51 — Strictly Positive Improvements (value-probe isol
   await expect(page.getByText('Total Row Count: 62')).toBeVisible({
     timeout: MANUAL_NODE_TIMEOUT_MS,
   })
+  await recordSuccess(testInfo, usage.samples)
 })

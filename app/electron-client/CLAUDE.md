@@ -32,8 +32,13 @@ desktop binary (AppImage/DMG/exe + installer).
 Currently driven by `./run ide build` (the legacy Enso build CLI). Don't call
 `electron-builder` or `pnpm run dist` manually unless you're debugging packaging
 — the build CLI wires the engine bundle, GUI, and Electron together with the
-right env vars. `./run` is slated to be replaced by a Bazel target; check for
-one before assuming `./run` is the only path.
+right env vars. Always checkout submodules before building - they contain
+important environment information. For testing, always build with
+`--mode staging`, to not pollute production backend and telemetry with test
+runs.
+
+`./run` is slated to be replaced by a Bazel target; check for one before
+assuming `./run` is the only path.
 
 `watch:linux` / `watch:macos` / `watch:windows` scripts are for local iteration
 once `./run ide build` has produced the engine bundle.
@@ -84,6 +89,16 @@ engine binary). When the binary cannot be located the path is `undefined`; the
 session still spawns but without filesystem access and with the stdlib hint
 omitted from the system prompt — the agent shouldn't be told it has tools it
 can't actually use.
+
+**Cwd sandboxing.** The spawned `claude` is launched with `cwd` set to a fresh
+empty temp dir (`<tmpdir>/enso-claude-cwd-<rand>/`), removed on `shutdown()`.
+The Read/Glob/Grep tools resolve filesystem operations against the cwd plus any
+`--add-dir` paths; without an explicit cwd the child would inherit Electron's,
+putting the user's home directory and `/tmp` within reach. The empty-dir cwd
+plus `--add-dir <stdlibRoot>` confines those tools to the stdlib alone. User
+data is never accessible by `Read` — it only flows back through
+`evaluateExpression`, which is the right boundary anyway because user data lives
+in the engine and is only correctly observable through the LS.
 
 `REQUEST_TIMEOUT_MS` was bumped from 120 s (pre-tools) to 360 s — a single turn
 now does up to a handful of stdlib lookups plus `evaluateExpression` round-trips
@@ -159,24 +174,29 @@ wired.
 
 **Renderer side:**
 `app/gui/src/project-view/components/ComponentBrowser/aiToolHandler.ts` exposes
-a `useAiToolHandler()` Vue composable mounted by `ComponentBrowser.vue`. It
-subscribes to `window.api.ai.onToolCall`, resolves the LS scope-anchor (the
-current method body's `externalId`, mirroring the `ComponentBrowser.vue` preview
-path — see the long-form scope-semantics docstring at the top of
-`aiToolHandler.ts` for why this is the right anchor and why graph node ids are
-not), calls `queuedExecuteExpressionRaw(anchor, expression)` from the project
-store (the **raw** variant — JSON parsing is intentionally bypassed so the agent
-controls the encoding; the queued variant cooperates with the
-`MAX_IN_PROGRESS=5` cap and retry/backoff in `project.ts`), and forwards the
-UTF-8-decoded text through `replyToolCall`. Failure paths run through
-`translateEngineError` so the engine's raw
-`Cannot encode class X to byte array.` becomes a self-teaching hint. Returns a
-clean `Err` for "no active project", "current method has no parsed AST", and
-"current method has no body to anchor scope". The slot machinery in
-`project.ts:awaitExecuteSlot` resolves with `Err(message)` on `failed`/timeout
-(rather than rejecting) so the `Result<string>` contract is consistent across
-success and failure paths and `aiToolHandler.ts`'s `if (!result.ok)` branch
-catches every legitimate evaluation failure.
+a `useAiToolHandler()` Vue composable mounted by `GraphEditor.vue` so the IPC
+subscription lives for the whole project session — the Component Browser closes
+on AI-prompt submission and would otherwise tear the handler down before the
+agent issues its first tool call. It subscribes to `window.api.ai.onToolCall`,
+looks up the originating placeholder via
+`aiPrompts.findByRequestId(request.aiRequestId)`, and uses the entry's
+`methodBodyId` (captured at enqueue) as the LS scope-anchor — pinning per
+request rather than per current view, so a method-navigation while the turn is
+in flight does not silently move tool calls into the wrong scope. See the
+scope-semantics docstring at the top of `aiToolHandler.ts` for why the body's
+`externalId` is the right anchor and why graph node ids are not. It then calls
+`queuedExecuteExpressionRaw(anchor, expression)` from the project store (the
+**raw** variant — JSON parsing is intentionally bypassed so the agent controls
+the encoding; the queued variant cooperates with the `MAX_IN_PROGRESS=5` cap and
+retry/backoff in `project.ts`), and forwards the UTF-8-decoded text through
+`replyToolCall`. Failure paths run through `translateEngineError` so the
+engine's raw `Cannot encode class X to byte array.` becomes a self-teaching
+hint. Returns a clean `Err` for "no active project", "current method has no
+parsed AST", and "current method has no body to anchor scope". The slot
+machinery in `project.ts:awaitExecuteSlot` resolves with `Err(message)` on
+`failed`/timeout (rather than rejecting) so the `Result<string>` contract is
+consistent across success and failure paths and `aiToolHandler.ts`'s
+`if (!result.ok)` branch catches every legitimate evaluation failure.
 
 The renderer reaches the IPC via `window.api.ai.generateComponent(...)` (see
 `enso-gui/src/electronApi.ts`) over channel `Channel.generateAiComponent`. The
@@ -184,16 +204,14 @@ shared request/response types live in `enso-common/src/ai.ts`. The IPC return
 shape is
 `AiComponentIpcReply = { result: Result<AiComponentResponse>, usage: RequestUsage | null }`
 — `result` carries the parsed/validated component (or an error), and `usage`
-carries `inputTokens`/`outputTokens` plus the session's cumulative context-byte
-total for that turn. The renderer logs a one-line `[AI] usage:` summary to its
-DevTools console so context growth is observable on real data. Cache-hit fields
-are intentionally not surfaced — the CLI's stream-json mode doesn't engage
-Anthropic prompt caching (see "Stream-json wire format" below), so there is
-nothing useful to log there. At main-process startup `initClaudeAgentIpc()`
-attaches a one-time diagnostic to `session.ready` so a missing CLI logs an
-install hint immediately, without spawning a separate `--version` probe — the
-session itself surfaces ENOENT through the watcher (synchronous spawner throws
-via `firstSpawn`, async `'error'` events captured by `ChildProcessHandle`'s
+carries `inputTokens`/`outputTokens` plus `contextTokens` (the API-reported
+input size for this turn — see "Context tokens" below). The renderer logs a
+one-line `[AI] usage:` summary to its DevTools console so context growth is
+observable on real data. At main-process startup `initClaudeAgentIpc()` attaches
+a one-time diagnostic to `session.ready` so a missing CLI logs an install hint
+immediately, without spawning a separate `--version` probe — the session itself
+surfaces ENOENT through the watcher (synchronous spawner throws via
+`firstSpawn`, async `'error'` events captured by `ChildProcessHandle`'s
 `exitError` and forwarded through `UnexpectedExitInfo`). The first real IPC call
 surfaces the same error to the renderer as a toast.
 
@@ -234,18 +252,17 @@ Findings from the probe at the time the long-lived design landed:
      **repeats every turn**, not just at startup. Filter on `type==='system'`.
   2. `{"type":"rate_limit_event", ...}` — emitted at least on the first turn.
      Filter.
-  3. `{"type":"assistant","message":{...,content:[{"type":"text","text":"..."}]}}`
-     — the assistant reply (one event in non-partial mode).
+  3. `{"type":"assistant","message":{...,content:[...],usage:{...}}}` — one
+     event per completion call. A multi-hop turn (with tool_use loops) emits one
+     assistant envelope per hop, each carrying `message.usage` for that specific
+     completion. The final envelope before the result holds the synthesis call's
+     usage and is the source for `RequestUsage.contextTokens`.
   4. `{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed", "result":<text>,"usage":{...},...}`
-     — terminal envelope. `result.usage` carries `input_tokens` and
-     `output_tokens` (the cache-related fields are also present but always 0;
-     see the prompt-caching note). This is the unambiguous end-of-turn signal.
+     — terminal envelope. `result.usage` carries `input_tokens`,
+     `output_tokens`, `cache_creation_input_tokens`, and
+     `cache_read_input_tokens`. This is the unambiguous end-of-turn signal.
 - **Multi-turn:** the same child accepts subsequent turns; `session_id` is
   stable and conversation history is maintained on the CLI side.
-- **Prompt caching does NOT auto-engage** in stream-json mode —
-  `cache_read_input_tokens` is observed at 0 even with a substantial system
-  prompt. The win from the long-lived design is cold-start avoidance, not cache
-  reuse.
 - **Malformed stdin is fatal:** sending an unparsable line makes the CLI emit
   `Error parsing streaming input line: …` on stderr and `exit 1`. We always
   write `JSON.stringify(...)`, so we never trigger this — the crash-respawn path
@@ -257,10 +274,25 @@ Findings from the probe at the time the long-lived design landed:
 
 ### Runtime behavior
 
-- **FIFO queue:** overlapping IPC calls (possible because the renderer's
-  `processingAIPrompt` gate is per-window) are serialized through a shared
-  `AsyncQueue` from `enso-common/src/utilities/async`. Only one stdin write is
-  in flight at a time.
+- **FIFO queue:** the renderer's `aiPrompts` store enforces single-in-flight at
+  the window level, but overlapping IPC calls (multi-window, or main-process
+  priming overlap) are still serialized through a shared `AsyncQueue` from
+  `enso-common/src/utilities/async`. Only one stdin write is in flight at a
+  time.
+- **Cancellation:** `Channel.cancelAiComponent` carries the renderer's
+  `requestId`. On match against the pending slot, the session nulls pending
+  synchronously, resolves the originating turn with
+  `Err('Claude agent: cancelled by user')`, and sends SIGINT to the child to
+  abort the in-flight HTTPS stream to Anthropic. A 2-second watchdog escalates
+  to SIGTERM if the CLI ignores SIGINT in `-p stream-json` mode (the watcher
+  then sees the child exit and auto-respawns — the warm context is lost, but the
+  user got a fast cancel). For a queued request that hasn't reached `runOneTurn`
+  yet, the id is filed in a `cancelled` set; the queue task consumes it on entry
+  and short-circuits without any signal needed. SIGINT behavior in stream-json
+  mode is not officially documented; if the CLI exits on SIGINT, the watcher
+  just respawns. We did NOT add an "in-stdin cancel message" path: the CLI is
+  turn-based, so a cancel line submitted mid-turn queues for AFTER the current
+  turn finishes, by which point the tokens are already spent.
 - **Crash recovery:** an unexpected child exit fails any in-flight request with
   a structured `Err(...)`, then auto-respawns and re-primes. A crash-loop guard
   suspends auto-respawn after 3 unexpected exits within 30 seconds; the next IPC
@@ -269,10 +301,50 @@ Findings from the probe at the time the long-lived design landed:
 - **Per-request timeout** (360s) returns `Err(timeout)` to the renderer but does
   **not** kill the still-warm child — the next request will reuse it. The late
   reply from the timed-out turn is dropped by the parser (`pending` is null).
-- **Context bytes:** the session tracks a running UTF-8 byte count covering the
-  system prompt, every stdin user-turn body, and every stdout assistant content
-  body. Reset on respawn. Surfaced as `RequestUsage.contextBytes` for the
-  per-request log.
+- **Live progress:** `Channel.aiProgress` carries `AiProgressEvent`s tagged with
+  the originating `requestId`. `queued` fires once the IPC reaches the
+  AsyncQueue (acknowledging receipt — useful when a previous turn hasn't yet
+  released the queue slot, or when priming is still finishing); `started` fires
+  once stdin has been written; `text` fires for every non-empty text block in an
+  `assistant` envelope; `tool` fires for every `tool_use` block (covers both
+  built-in `Read`/`Glob`/`Grep` and the MCP `evaluateExpression`). The
+  renderer's `aiPrompts` store routes each event to the placeholder it created
+  and updates the visible status text. `emitProgress` filters events whose
+  `requestId` doesn't match the current pending slot, so a stale event from a
+  rotated/cancelled turn never lands on a new placeholder; the `queued` emit
+  uses a separate `emitProgressTo(sender, …)` path because it must fire _before_
+  the pending slot is set.
+- **Context vs. cost split in `RequestUsage`.** Every `assistant` envelope the
+  CLI emits carries Anthropic's per-completion `message.usage`; the terminal
+  `result` envelope carries a roll-up that is empirically the **sum across all
+  hops in the turn** (model → `tool_use` → `tool_result` → model continues …).
+  We capture both:
+
+  - `contextTokens` =
+    `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` from
+    the **last** assistant envelope before the result. That is the synthesis
+    call's actual prompt size, the most-loaded state of the turn — the right
+    number to compare to a context window. It grows approximately monotonically
+    across turns. If the final envelope omits `usage` (`captureAssistantContent`
+    overwrites `lastHopUsage` with `null` rather than coalescing, so a stale
+    earlier value never leaks through), this falls back to the result-envelope
+    sum. The renderer's `logUsage` flips `ctxSrc=fallback` and emits a
+    `console.warn`; `aiMetrics.appendMetricsRow` refuses to write the CSV row
+    when any sample has `hopCount > 0` and `contextFromLastHop=false`, failing
+    the Playwright run so the developer notices broken telemetry instead of
+    silently archiving misleading data.
+  - `contextFromLastHop` exposes the source of `contextTokens` so consumers can
+    validate; see above for the metrics writer's enforcement.
+  - `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreationTokens`,
+    `hopCount` are turn totals from `result.usage` (and the count of assistant
+    envelopes seen). They are the right inputs for billing and for explaining
+    why a heavy-hops turn cost what it did.
+
+  The renderer logs both:
+  `prompt=…t out=…t context=<n.n>k hops=N ctxSrc=<lastHop|fallback> (cacheRead=…t cacheCreate=…t) time=…ms`.
+  Conversation history accumulates in CLI process memory across the session
+  (there is no auto-compact in `-p` mode — that's an interactive-mode feature),
+  so `contextTokens` resets only on child respawn or process restart.
 
 ### Gotchas
 
@@ -300,14 +372,13 @@ rule in `playwright.config.ts`:
 
 - `tests/headless/*.test.ts` — Vitest unit tests for main-process code. No
   Electron, no DOM. Fast. Run with `corepack pnpm vitest --run tests/headless`.
-  This is where `claudeAgent.test.ts` lives.
 - `tests/*.spec.ts` — Playwright end-to-end tests that launch the packaged
   Electron binary from `dist/ide/` and drive the app from a real user's
   perspective (login → dashboard → project → graph editor). `electronTest.ts`
   extends Playwright's `test` fixture to spawn Electron and exposes helpers like
   `loginAsTestUser`, `createNewProject`, `openComponentBrowser`. See
   `tests/README.md` for prerequisites (a built `dist/ide/`, credentials at
-  `playwright/.auth/user.json`). Run with
+  `playwright/.auth/user.json`). If on a worktree, Run with
   `corepack pnpm -r --filter enso ide-integration-test [path.spec.ts]`. Runs are
   long (minutes), so avoid them in inner dev loops.
 

@@ -18,13 +18,13 @@ import { useRightPanelData } from '$/providers/rightPanel'
 import { graphBindings } from '@/bindings'
 import BottomPanel from '@/components/BottomPanel.vue'
 import CodeEditor from '@/components/CodeEditor.vue'
-import ComponentBrowser from '@/components/ComponentBrowser.vue'
+import ComponentBrowser, { type AiPromptSubmission } from '@/components/ComponentBrowser.vue'
+import { useAiToolHandler } from '@/components/ComponentBrowser/aiToolHandler'
 import type { Usage } from '@/components/ComponentBrowser/input'
 import { usePlacement } from '@/components/ComponentBrowser/placement'
 import ContextMenuTrigger from '@/components/ContextMenuTrigger.vue'
 import GraphEdges from '@/components/GraphEditor/GraphEdges.vue'
 import GraphNodes from '@/components/GraphEditor/GraphNodes.vue'
-import { createAiNode, type AcceptedAiPayload } from '@/components/GraphEditor/aiNode'
 import { performCollapse, prepareCollapsedInfo } from '@/components/GraphEditor/collapsing'
 import { useGraphEditorClipboard } from '@/components/GraphEditor/graphClipboard'
 import type { NodeCreationOptions } from '@/components/GraphEditor/nodeCreation'
@@ -52,6 +52,7 @@ import { provideGraphSelection } from '@/providers/graphSelection'
 import { provideStackNavigator } from '@/providers/graphStackNavigator'
 import { injectKeyboard } from '@/providers/keyboard'
 import { provideLanguageSupportExtensions } from '@/providers/languageSupportExtensions'
+import { provideOngoingAiPrompts } from '@/stores/ongoingAiPrompts'
 import { providePersisted } from '@/stores/persisted'
 import { provideVisualizationStore } from '@/stores/visualization'
 import { assert, bail } from '@/util/assert'
@@ -97,6 +98,8 @@ provideLanguageSupportExtensions({
 })
 
 const nodeExecution = provideNodeExecution(projectStore)
+const aiPrompts = provideOngoingAiPrompts()
+useAiToolHandler(aiPrompts)
 ;(window as any)._mockSuggestion = suggestionDb.mockSuggestion
 
 onMounted(() => {
@@ -515,27 +518,27 @@ function commitComponentBrowser(
   hideComponentBrowser()
 }
 
-function handleAiAccepted(payload: AcceptedAiPayload) {
+function handleAiAccepted(payload: AiPromptSubmission) {
   const currentMethodName = unwrapOr(graphStore.currentMethod.pointer, undefined)?.name
-  const topLevel = module.value.root
-  if (currentMethodName == null || topLevel == null) {
+  if (!graphStore.currentMethod.ast.ok || currentMethodName == null) {
     toasts.userActionFailed.show('Cannot create AI component: no current method loaded.')
     hideComponentBrowser()
     return
   }
-  const editResult = module.value.edit((edit) =>
-    createAiNode({
-      edit,
-      topLevel: edit.getVersion(topLevel),
-      currentMethodName,
-      binding: graphStore.generateLocallyUniqueIdent('ai_component'),
-      position: componentBrowserNodePosition.value,
-      payload,
-    }),
-  )
-  if (!editResult.ok) {
-    toasts.userActionFailed.reportError(editResult.error, 'Cannot create AI component')
+  const methodAst = graphStore.currentMethod.ast.value
+  if (methodAst.body == null) {
+    toasts.userActionFailed.show('Cannot create AI component: current method has no body.')
+    hideComponentBrowser()
+    return
   }
+  aiPrompts.enqueue({
+    prompt: payload.prompt,
+    sourceIdentifier: payload.sourceIdentifier,
+    methodId: methodAst.externalId,
+    methodBodyId: methodAst.body.externalId,
+    methodName: currentMethodName,
+    position: componentBrowserNodePosition.value,
+  })
   hideComponentBrowser()
 }
 

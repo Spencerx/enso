@@ -10,8 +10,10 @@ import spawn from 'cross-spawn'
 import { ipcMain, type WebContents } from 'electron'
 import {
   aiComponentResponseSchema,
+  type AiCancelRequest,
   type AiComponentIpcReply,
   type AiComponentRequest,
+  type AiProgressEvent,
   type RequestUsage,
 } from 'enso-common/src/ai'
 import { AsyncQueue, createDeferred, type Deferred } from 'enso-common/src/utilities/async'
@@ -21,6 +23,9 @@ import {
   type UnexpectedExitInfo,
 } from 'enso-common/src/utilities/childProcess'
 import { Err, Ok } from 'enso-common/src/utilities/data/result'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import readline from 'node:readline'
 import { z } from 'zod'
 import { startAiMcpServer, type AiMcpServer } from './aiMcpServer.js'
@@ -37,6 +42,11 @@ const RESPAWN_WINDOW_MS = 30_000
 const MAX_RESPAWNS_IN_WINDOW = 3
 const PRIMING_PROMPT =
   'Acknowledge readiness with the single word READY. This is a session warm-up; do not return JSON.'
+
+/** Synthetic request id used for the priming turn. */
+const PRIMING_REQUEST_ID = 'priming'
+/** SIGINT (graceful) to SIGTERM (force respawn) escalation window. */
+const CANCEL_SIGINT_TO_SIGTERM_MS = 2_000
 
 /** Configuration for the long-lived `claude` session. */
 export interface ClaudeSessionConfig {
@@ -100,7 +110,9 @@ You will receive:
 - Other identifiers already in scope in that method, with their Enso types when known. You may reference any of them.
 - A natural-language description of what the new component should do.
 
-You must return a JSON object with these four fields and nothing else (no prose, no code fences, no leading or trailing whitespace):
+**Live progress narration (REQUIRED whenever you use any tool).** The user sees these notes as the placeholder node's status text. Every time you start a new logical step that uses tools, emit ONE short text block (≤8 words, present continuous, no code or paths) describing that step in plain English — e.g. "Checking Pokemon Cards columns", "Looking up Table.join signature", "Reading Standard.Table source", "Drafting filter step". One narration covers all the tool calls within that step; you don't need to restate it per tool call. The narration text block must come before the tool_use blocks for that step. If you skip the narration the user just sees "Thinking…" and feels stuck; treat it as part of the contract, not optional. Code, expression text, and file paths must NOT appear in the narration — those are logged separately.
+
+Your closing assistant turn (after the last tool round, or right away if you don't use tools) must be the JSON object described below and nothing else (no narration, no prose, no code fences, no leading or trailing whitespace):
 - \`functionName\`: snake_case identifier for the new top-level function. It must not collide with an identifier already used in the surrounding method or with a name visible in the supplied method source. Pick something descriptive of what the function does.
 - \`argumentNames\`: parameter names in the function signature, in declaration order. Pick names that describe each parameter's role inside the function — they do *not* have to match any in-scope identifier and they are the names you reference inside \`body\`. Only declare parameters that \`body\` actually uses.
 - \`body\`: the function body, as a string. Every line belongs to the body; no leading or trailing blank lines. Reference the parameters by the names you listed in \`argumentNames\`. The final line must be a single identifier — the binding that holds the result. Do not include the function signature, the \`=\` sign, or any module wrapper.
@@ -112,7 +124,7 @@ Rules:
 - \`argumentNames\` and \`callArguments\` must have the same length.
 - Return only valid Enso — avoid placeholders, pseudocode, or commentary.
 
-If the user message is a session warm-up and the request is not for a component, reply briefly in plain text. Otherwise, every reply must be the JSON object described above.`
+If the user message is a session warm-up and the request is not for a component, reply briefly in plain text. Otherwise, your closing assistant turn must be the JSON object described above and nothing else.`
 }
 
 // =================
@@ -161,10 +173,70 @@ function parseJsonSafe(text: string): unknown {
   }
 }
 
+/**
+ * Try strict JSON.parse first; on failure, fall back to extracting the last balanced top-level
+ * `{…}` object in the text. The fallback covers the case where the model leaks narration prose
+ * into its closing turn instead of emitting JSON-only.
+ */
+export function extractJsonObject(text: string): unknown {
+  const direct = parseJsonSafe(text)
+  if (direct != null && typeof direct === 'object') return direct
+  let depth = 0
+  let start = -1
+  let inString = false
+  let escape = false
+  let bestStart = -1
+  let bestEnd = -1
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (escape) {
+      escape = false
+      continue
+    }
+    if (ch === '\\') {
+      escape = true
+      continue
+    }
+    if (ch === '"') {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (ch === '{') {
+      if (depth === 0) start = i
+      depth++
+    } else if (ch === '}') {
+      depth--
+      if (depth === 0 && start !== -1) {
+        bestStart = start
+        bestEnd = i
+        start = -1
+      }
+    }
+  }
+  if (bestStart < 0 || bestEnd < 0) return null
+  return parseJsonSafe(text.slice(bestStart, bestEnd + 1))
+}
+
 function truncateStderr(stderr: string): string {
   const trimmed = stderr.trim()
   if (trimmed.length <= STDERR_TAIL_CHARS) return trimmed
   return `…${trimmed.slice(-STDERR_TAIL_CHARS)}`
+}
+
+/**
+ * Send a progress event to a specific renderer without going through the per-turn `pending` slot.
+ * Used for `queued` acknowledgments emitted before the turn begins (and thus before `pending`
+ * is set) — `ClaudeAgentSession.emitProgress` requires a matching pending requestId, which we
+ * don't have yet at that point.
+ */
+function emitProgressTo(sender: WebContents, event: AiProgressEvent): void {
+  if (sender.isDestroyed()) return
+  try {
+    sender.send(Channel.aiProgress, event)
+  } catch {
+    // Renderer destroyed mid-emit; the next send will short-circuit on isDestroyed().
+  }
 }
 
 // ====================================
@@ -224,9 +296,21 @@ function userTurnLine(content: string): string {
 const tokenUsageSchema = z.object({
   input_tokens: z.number().optional(),
   output_tokens: z.number().optional(),
+  // Anthropic API reports the input split between non-cached and cache-served tokens; sum all
+  // three to recover the actual context size the API saw for this completion.
+  cache_creation_input_tokens: z.number().optional(),
+  cache_read_input_tokens: z.number().optional(),
 })
 /* eslint-enable camelcase */
 
+// `text` blocks carry the model's natural-language output; `tool_use` blocks carry the model's
+// decision to call a tool (`name` is the tool name, `input` is the args payload). The fields
+// below cover both shapes so we can route each block in `captureAssistantContent` without a
+// second parse — anything else is ignored. The CLI may also surface `message.usage` on each
+// envelope (Anthropic Messages API standard); when present it's the *per-hop* `usage` for the
+// completion call that produced this assistant message — captured to estimate the actual
+// context window occupancy of the turn's final synthesis call. Optional because some CLI
+// versions / envelope shapes may omit it.
 const assistantEnvelopeSchema = z.object({
   type: z.literal('assistant'),
   message: z.object({
@@ -234,8 +318,11 @@ const assistantEnvelopeSchema = z.object({
       z.object({
         type: z.string(),
         text: z.string().optional(),
+        name: z.string().optional(),
+        input: z.unknown().optional(),
       }),
     ),
+    usage: tokenUsageSchema.optional(),
   }),
 })
 
@@ -251,14 +338,40 @@ interface TurnOutcome {
   state: 'completed' | 'crash'
   text: string
   usage: RawTokenUsage | null
+  /** `usage` from the final `assistant` envelope; `null` when none seen / CLI omitted it. */
+  lastHopUsage: RawTokenUsage | null
+  /** Number of `assistant` envelopes seen this turn. `0` for crash-before-first-response. */
+  hopCount: number
+  /**
+   * Wall-clock ms from the moment we wrote the user turn to stdin until the turn settled
+   * (completed, crashed, timed out, or was cancelled). `0` means the turn never started — the
+   * child wasn't alive when {@link runOneTurn} was called, so there was no clock to measure.
+   */
+  durationMs: number
   errorReason?: string
 }
 
 interface PendingTurn {
-  resolve: (outcome: TurnOutcome) => void
+  /** Renderer-supplied id, or {@link PRIMING_REQUEST_ID} for priming. */
+  readonly requestId: string
+  resolve: (outcome: Omit<TurnOutcome, 'durationMs' | 'lastHopUsage' | 'hopCount'>) => void
   textChunks: string[]
-  // Pinned per turn (not per session) so crash/shutdown drop the slot for free; `null` for priming.
+  /** Pinned per turn (not per session) so crash/shutdown drop the slot for free; `null` for priming. */
   sender: WebContents | null
+  /**
+   * Most recent `assistant` envelope's `message.usage` we observed in this turn. Used as the
+   * "current context window occupancy" signal at turn end. `null` when the CLI doesn't surface per-envelope
+   * `usage`.
+   */
+  lastHopUsage: RawTokenUsage | null
+  /** Number of `assistant` envelopes seen this turn. */
+  hopCount: number
+}
+
+/** Renderer + request id driving a turn. */
+export interface ActiveRequest {
+  readonly requestId: string
+  readonly sender: WebContents
 }
 
 // ============================
@@ -276,13 +389,29 @@ export class ClaudeAgentSession {
   private readyDeferred: Deferred<void> = createDeferred()
   private readonly queue = new AsyncQueue<void>(Promise.resolve())
   private pending: PendingTurn | null = null
-  private contextBytes = 0
   private stderrTail = ''
   private disposed = false
+  /** Ids cancelled while still queued behind another turn; consumed by the queue task on entry. */
+  private readonly cancelled = new Set<string>()
+  /**
+   * Ids currently in the queue or running. Populated synchronously in {@link runRequest} before
+   * the task is pushed, cleared in the task's `finally` once it settles.
+   */
+  private readonly liveRequests = new Set<string>()
+  /**
+   * Empty temp dir used as the spawned `claude` process's cwd. Without it the child inherits
+   * Electron's cwd and the agent's `Read` tool can reach arbitrary paths under it (user home,
+   * `/tmp`, ...). Pairing an empty cwd with `--add-dir <stdlibRoot>` confines `Read`/`Glob`/
+   * `Grep` to the stdlib, forcing the agent to use `evaluateExpression` for any user-data
+   * inspection — which is the right boundary anyway, since user data lives in the engine and
+   * is only correctly observable through the LS.
+   */
+  private readonly sandboxCwd: string
 
   /** Spawn the child eagerly and kick off the priming turn in the background. */
   constructor(config: ClaudeSessionConfig) {
     this.config = config
+    this.sandboxCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'enso-claude-cwd-'))
     // Attach a no-op rejection handler so that a crash mid-priming doesn't surface as an
     // unhandled rejection when no `runRequest` happens to be awaiting `ready` at the time.
     // Awaiters that arrive later attach their own .then/.catch and still observe the rejection.
@@ -295,6 +424,7 @@ export class ClaudeAgentSession {
         spawn(CLAUDE_EXECUTABLE, streamJsonArgs(this.config), {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: process.env,
+          cwd: this.sandboxCwd,
         }),
       {
         onChildStarted: this.onChildStarted.bind(this),
@@ -315,15 +445,15 @@ export class ClaudeAgentSession {
   }
 
   /**
-   * Renderer that originated the in-flight turn, or `null` between turns or after the renderer
-   * was destroyed mid-turn. Read by the MCP server to dispatch tool calls back to the right window.
+   * The renderer + request id driving the in-flight turn, or `null` between turns / when the
+   * renderer was destroyed.
    */
-  get activeSender(): WebContents | null {
+  get activeRequest(): ActiveRequest | null {
     const pending = this.pending
     if (pending == null) return null
     const sender = pending.sender
     if (sender == null || sender.isDestroyed()) return null
-    return sender
+    return { requestId: pending.requestId, sender }
   }
 
   /** Run an AI component request through the long-lived session. */
@@ -336,31 +466,107 @@ export class ClaudeAgentSession {
         })
         return
       }
+      // Tracked synchronously here so a cancel arriving between this point and the task's
+      // entry-check is recognized as live and gets filed into `cancelled` rather than dropped.
+      this.liveRequests.add(request.requestId)
       this.queue.pushTask(async () => {
-        if (this.disposed) {
-          resolveOuter({ result: Err('Claude agent has been shut down'), usage: null })
-          return
-        }
-        if (this.watcher.respawnSuspended && !this.watcher.current?.alive) {
-          // The watcher's recent-exits buffer is preserved across respawn(), so a quick re-crash
-          // trips the guard again and we don't loop indefinitely.
-          this.readyDeferred = createDeferred()
-          this.readyDeferred.promise.catch(() => undefined)
-          await this.watcher.respawn()
-        }
         try {
-          await this.ready
-        } catch (err) {
-          resolveOuter({
-            result: Err(this.formatNotReadyError(err)),
-            usage: null,
-          })
-          return
+          // Cancellation that arrived while the request was queued behind another turn: the
+          // pending slot didn't match this `requestId` at cancel time, so the cancel was filed in
+          // the `cancelled` set. Consume it here before paying the cost of a real turn.
+          if (this.cancelled.delete(request.requestId)) {
+            resolveOuter({ result: Err('Cancelled by user'), usage: null })
+            return
+          }
+          // Acknowledge IPC receipt now that we know we're going to actually run the turn. For
+          // an uncontended request `started` follows microseconds later, but multi-window or
+          // post-priming contention can keep us here long enough for the renderer to want a
+          // "we got it" signal.
+          emitProgressTo(sender, { requestId: request.requestId, kind: 'queued' })
+          if (this.disposed) {
+            resolveOuter({ result: Err('Claude agent has been shut down'), usage: null })
+            return
+          }
+          if (this.watcher.respawnSuspended && !this.watcher.current?.alive) {
+            // The watcher's recent-exits buffer is preserved across respawn(), so a quick
+            // re-crash trips the guard again and we don't loop indefinitely.
+            this.readyDeferred = createDeferred()
+            this.readyDeferred.promise.catch(() => undefined)
+            await this.watcher.respawn()
+          }
+          try {
+            await this.ready
+          } catch (err) {
+            resolveOuter({
+              result: Err(this.formatNotReadyError(err)),
+              usage: null,
+            })
+            return
+          }
+          const turn = await this.runOneTurn(
+            buildUserPrompt(request),
+            REQUEST_TIMEOUT_MS,
+            sender,
+            request.requestId,
+          )
+          resolveOuter(this.replyFromTurn(turn))
+        } finally {
+          // Drop both bookkeeping entries no matter how the task settled (success, early-return,
+          // throw). This is what bounds {@link cancelled} — any id added by a `cancelTurn` whose
+          // task body has already passed the entry-check gets cleaned up here.
+          this.cancelled.delete(request.requestId)
+          this.liveRequests.delete(request.requestId)
         }
-        const turn = await this.runOneTurn(buildUserPrompt(request), REQUEST_TIMEOUT_MS, sender)
-        resolveOuter(this.replyFromTurn(turn))
       })
     })
+  }
+
+  /**
+   * Cancel a previously-dispatched request. For the in-flight slot the originating turn resolves
+   * synchronously with a cancellation `Err` and the child is SIGINT'd (with a 2s SIGTERM watchdog
+   * if SIGINT is ignored). Queued requests file the id in {@link cancelled} for the queue task to
+   * short-circuit. Idempotent.
+   */
+  cancelTurn(requestId: string): void {
+    if (this.disposed) return
+    const pending = this.pending
+    if (pending != null && pending.requestId === requestId) {
+      this.pending = null
+      pending.resolve({
+        state: 'crash',
+        text: '',
+        usage: null,
+        errorReason: 'cancelled by user',
+      })
+      this.signalCancel()
+      return
+    }
+    // Only file a deferred cancel when the id is one we're tracking — cancels for ids that have
+    // already settled, or that were never issued, would otherwise accumulate in the set forever.
+    if (this.liveRequests.has(requestId)) {
+      this.cancelled.add(requestId)
+    }
+  }
+
+  /** SIGINT then SIGTERM-after-2s; best-effort, since the cancellation Err already landed. */
+  private signalCancel(): void {
+    const handle = this.watcher.current
+    if (handle == null || !handle.alive) return
+    try {
+      handle.child.kill('SIGINT')
+    } catch {
+      // ignore — already exiting
+    }
+    setTimeout(() => {
+      const stillAliveHandle = this.watcher.current
+      if (stillAliveHandle == null || !stillAliveHandle.alive) return
+      if (stillAliveHandle !== handle) return
+      try {
+        stillAliveHandle.child.kill('SIGTERM')
+      } catch {
+        // ignore
+      }
+    }, CANCEL_SIGINT_TO_SIGTERM_MS)
   }
 
   /** Request graceful shutdown of the child and reject any pending work. */
@@ -378,12 +584,16 @@ export class ClaudeAgentSession {
       })
     }
     void this.watcher.close()
+    try {
+      fs.rmSync(this.sandboxCwd, { recursive: true, force: true })
+    } catch {
+      // Already gone or filesystem-level failure; nothing meaningful to do here.
+    }
   }
 
   // -------------- private --------------
 
   private onChildStarted(handle: ChildProcessHandle): void {
-    this.contextBytes = Buffer.byteLength(buildSystemPrompt(this.config), 'utf8')
     this.stderrTail = ''
     this.pending = null
 
@@ -436,7 +646,12 @@ export class ClaudeAgentSession {
   }
 
   private async prime(): Promise<void> {
-    const outcome = await this.runOneTurn(PRIMING_PROMPT, PRIMING_TIMEOUT_MS, null)
+    const outcome = await this.runOneTurn(
+      PRIMING_PROMPT,
+      PRIMING_TIMEOUT_MS,
+      null,
+      PRIMING_REQUEST_ID,
+    )
     if (outcome.state !== 'completed') {
       throw new Error(`priming turn ${outcome.state}: ${outcome.errorReason ?? '(no detail)'}`)
     }
@@ -449,6 +664,7 @@ export class ClaudeAgentSession {
     content: string,
     timeoutMs: number,
     sender: WebContents | null,
+    requestId: string,
   ): Promise<TurnOutcome> {
     return new Promise<TurnOutcome>((resolveTurn) => {
       const handle = this.watcher.current
@@ -458,21 +674,37 @@ export class ClaudeAgentSession {
           state: 'crash',
           text: '',
           usage: null,
+          lastHopUsage: null,
+          hopCount: 0,
+          durationMs: 0,
           errorReason: 'child process is not alive',
         })
         return
       }
       const line = userTurnLine(content)
-      this.contextBytes += Buffer.byteLength(line, 'utf8')
+      const startedAt = performance.now()
       const pending: PendingTurn = {
+        requestId,
         resolve: (outcome) => {
           if (timeoutHandle != null) clearTimeout(timeoutHandle)
-          resolveTurn(outcome)
+          const durationMs = Math.max(0, Math.round(performance.now() - startedAt))
+          resolveTurn({
+            ...outcome,
+            durationMs,
+            lastHopUsage: pending.lastHopUsage,
+            hopCount: pending.hopCount,
+          })
         },
         textChunks: [],
         sender,
+        lastHopUsage: null,
+        hopCount: 0,
       }
       this.pending = pending
+      // Emit `started` after `pending` is set so `emitProgress` can find the sender, and before
+      // the stdin write so the renderer flips queued→running close to when the prompt actually
+      // begins traveling toward the API.
+      this.emitProgress({ requestId, kind: 'started' })
       const timeoutHandle = setTimeout(() => {
         if (this.pending !== pending) return
         // Drop the pending claim so subsequent stdout for this turn is discarded; the runtime
@@ -516,11 +748,40 @@ export class ClaudeAgentSession {
   }
 
   private captureAssistantContent(env: z.infer<typeof assistantEnvelopeSchema>): void {
-    if (!this.pending) return
+    const pending = this.pending
+    if (!pending) return
+    pending.hopCount += 1
+    pending.lastHopUsage = env.message.usage ?? null
+    const requestId = pending.requestId
     for (const block of env.message.content) {
-      if (block.type !== 'text' || block.text == null) continue
-      this.pending.textChunks.push(block.text)
-      this.contextBytes += Buffer.byteLength(block.text, 'utf8')
+      if (block.type === 'text' && block.text != null) {
+        pending.textChunks.push(block.text)
+        if (block.text.trim().length > 0) {
+          this.emitProgress({ requestId, kind: 'text', text: block.text })
+        }
+      } else if (block.type === 'tool_use' && block.name != null) {
+        // Emit from here (not `aiMcpServer.dispatchToRenderer`) so built-in `Read`/`Glob`/`Grep`
+        // — which the CLI runs itself and never sends to our MCP server — are also captured.
+        this.emitProgress({
+          requestId,
+          kind: 'tool',
+          toolName: block.name,
+          input: block.input ?? null,
+        })
+      }
+    }
+  }
+
+  /** Drops silently when the pending slot has rotated or the originating sender is gone. */
+  private emitProgress(event: AiProgressEvent): void {
+    const pending = this.pending
+    if (pending == null || pending.requestId !== event.requestId) return
+    const sender = pending.sender
+    if (sender == null || sender.isDestroyed()) return
+    try {
+      sender.send(Channel.aiProgress, event)
+    } catch {
+      // Renderer destroyed mid-emit; nothing to do — the next progress check will short-circuit.
     }
   }
 
@@ -542,7 +803,7 @@ export class ClaudeAgentSession {
   }
 
   private replyFromTurn(turn: TurnOutcome): AiComponentIpcReply {
-    const usage = this.snapshotUsage(turn.usage)
+    const usage = this.snapshotUsage(turn.usage, turn.lastHopUsage, turn.hopCount, turn.durationMs)
     if (turn.state !== 'completed') {
       const reason = turn.errorReason ?? 'claude turn failed'
       return { result: Err(`Claude agent: ${reason}`), usage }
@@ -550,7 +811,7 @@ export class ClaudeAgentSession {
     if (!turn.text.trim()) {
       return { result: Err('Claude agent returned an empty reply'), usage }
     }
-    const parsedJson = parseJsonSafe(turn.text)
+    const parsedJson = extractJsonObject(turn.text)
     if (parsedJson == null) {
       return { result: Err('Claude agent reply was not valid JSON'), usage }
     }
@@ -564,12 +825,32 @@ export class ClaudeAgentSession {
     return { result: Ok(parsed.data), usage }
   }
 
-  private snapshotUsage(raw: RawTokenUsage | null): RequestUsage | null {
+  private snapshotUsage(
+    raw: RawTokenUsage | null,
+    lastHop: RawTokenUsage | null,
+    hopCount: number,
+    durationMs: number,
+  ): RequestUsage | null {
     if (!raw) return null
+    // Prefer the final assistant envelope's `usage` for the context-window signal — that's the
+    // synthesis call's actual prompt size, the most-loaded state of the turn. Fall back to the
+    // result-envelope sum only if the CLI didn't surface per-envelope `usage`, since the sum
+    // overstates occupancy on multi-hop turns. The renderer warns on fallback when
+    // `hopCount > 0` so the developer notices broken context telemetry.
+    const contextFromLastHop = lastHop != null
+    const contextSource = lastHop ?? raw
+    const contextInput = contextSource.input_tokens ?? 0
+    const contextCacheRead = contextSource.cache_read_input_tokens ?? 0
+    const contextCacheCreation = contextSource.cache_creation_input_tokens ?? 0
     return {
       inputTokens: raw.input_tokens ?? 0,
       outputTokens: raw.output_tokens ?? 0,
-      contextBytes: this.contextBytes,
+      cacheReadTokens: raw.cache_read_input_tokens ?? 0,
+      cacheCreationTokens: raw.cache_creation_input_tokens ?? 0,
+      contextTokens: contextInput + contextCacheRead + contextCacheCreation,
+      contextFromLastHop,
+      hopCount,
+      durationMs,
     }
   }
 
@@ -596,7 +877,7 @@ let mcpServer: AiMcpServer | null = null
  */
 export async function initAiMcpServer(): Promise<string | undefined> {
   try {
-    const started = await startAiMcpServer(() => session?.activeSender ?? null)
+    const started = await startAiMcpServer(() => session?.activeRequest ?? null)
     mcpServer = started.server
     console.info(`[AI] MCP server config at ${started.mcpConfigPath}`)
     return started.mcpConfigPath
@@ -641,6 +922,9 @@ export function initClaudeAgentIpc(config: ClaudeSessionConfig): void {
     async (event, request: AiComponentRequest): Promise<AiComponentIpcReply> =>
       currentSession.runRequest(request, event.sender),
   )
+  ipcMain.on(Channel.cancelAiComponent, (_event, payload: AiCancelRequest) => {
+    currentSession.cancelTurn(payload.requestId)
+  })
 }
 
 /** Tear down the long-lived session and MCP server. Wired to `app.on('before-quit', ...)`. */

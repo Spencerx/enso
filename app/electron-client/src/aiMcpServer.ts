@@ -5,7 +5,7 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { ipcMain, type WebContents } from 'electron'
+import { ipcMain } from 'electron'
 import type { AiToolCallReply, AiToolCallRequest } from 'enso-common/src/ai'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
@@ -13,12 +13,16 @@ import { createServer, type Server as HttpServer } from 'node:http'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { z } from 'zod'
+import type { ActiveRequest } from './claudeAgent.js'
 import { Channel } from './ipc.js'
 
 const TOOL_CALL_TIMEOUT_MS = 30_000
 
-/** Resolves the renderer for the currently-running AI turn, or `null` between turns. */
-export type ActiveSenderResolver = () => WebContents | null
+/**
+ * Resolve the renderer + request id pair driving the currently-in-flight Claude turn. Returns
+ * `null` when no AI turn is in flight (or during priming).
+ */
+export type ActiveRequestResolver = () => ActiveRequest | null
 
 /** Returned by {@link startAiMcpServer}; `mcpConfigPath` is the value for the CLI's `--mcp-config`. */
 export interface AiMcpServerHandle {
@@ -39,13 +43,13 @@ export class AiMcpServer {
   private readonly pending = new Map<string, PendingToolCall>()
   private readonly httpServer: HttpServer
   private configPath: string | null = null
-  private readonly resolveActiveSender: ActiveSenderResolver
+  private readonly resolveActiveRequest: ActiveRequestResolver
   private readonly ipcReplyListener: (event: unknown, reply: AiToolCallReply) => void
   private listening = false
 
   /** Wire up the IPC reply listener and the HTTP server (still unbound until {@link start}). */
-  constructor(resolveActiveSender: ActiveSenderResolver) {
-    this.resolveActiveSender = resolveActiveSender
+  constructor(resolveActiveRequest: ActiveRequestResolver) {
+    this.resolveActiveRequest = resolveActiveRequest
     this.httpServer = createServer((req, res) => void this.handleHttp(req, res))
     this.ipcReplyListener = (_event, reply) => this.handleReply(reply)
     ipcMain.on(Channel.aiToolReply, this.ipcReplyListener)
@@ -143,15 +147,18 @@ export class AiMcpServer {
   }
 
   private async dispatchToRenderer(
-    payload: Omit<AiToolCallRequest, 'requestId'>,
+    payload: Omit<AiToolCallRequest, 'requestId' | 'turnRequestId'>,
   ): Promise<AiToolCallReply['result']> {
-    const sender = this.resolveActiveSender()
-    if (sender == null) {
+    const active = this.resolveActiveRequest()
+    if (active == null) {
       return { ok: false, error: 'no active AI turn — tool calls only valid mid-turn' }
     }
-    if (sender.isDestroyed()) {
+    // Defensive: `activeRequest` already filters destroyed senders, but a tightly-timed
+    // destruction between resolver invocation and `send()` could still surface here.
+    if (active.sender.isDestroyed()) {
       return { ok: false, error: 'renderer was destroyed before the tool call could be dispatched' }
     }
+    const sender = active.sender
     const requestId = randomUUID()
     return new Promise<AiToolCallReply['result']>((resolve) => {
       const timer = setTimeout(() => {
@@ -163,7 +170,7 @@ export class AiMcpServer {
         }
       }, TOOL_CALL_TIMEOUT_MS)
       this.pending.set(requestId, { resolve, timer })
-      const request: AiToolCallRequest = { requestId, ...payload }
+      const request: AiToolCallRequest = { requestId, turnRequestId: active.requestId, ...payload }
       try {
         sender.send(Channel.aiToolCall, request)
       } catch (err) {
@@ -220,9 +227,9 @@ export class AiMcpServer {
 
 /** Convenience factory for the singleton case. */
 export async function startAiMcpServer(
-  resolveActiveSender: ActiveSenderResolver,
+  resolveActiveRequest: ActiveRequestResolver,
 ): Promise<{ server: AiMcpServer; mcpConfigPath: string }> {
-  const server = new AiMcpServer(resolveActiveSender)
+  const server = new AiMcpServer(resolveActiveRequest)
   const mcpConfigPath = await server.start()
   return { server, mcpConfigPath }
 }

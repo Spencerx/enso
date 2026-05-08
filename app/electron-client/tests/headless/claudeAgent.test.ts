@@ -60,6 +60,7 @@ class FakeChild extends EventEmitter {
 }
 
 const exampleRequest: AiComponentRequest = {
+  requestId: 'req-test',
   prompt: 'filter to rows with value over 5',
   context: {
     sourceIdentifier: 'source',
@@ -69,6 +70,15 @@ const exampleRequest: AiComponentRequest = {
     inScopeBindings: [{ identifier: 'helper', typeName: 'Standard.Base.Number' }],
     moduleImports: ['from Standard.Base import all', 'from Standard.Table import all'],
   },
+}
+
+/** Build a request with a unique id, defaulting to {@link exampleRequest}'s shape. */
+function makeRequest(overrides: Partial<AiComponentRequest> = {}): AiComponentRequest {
+  return {
+    ...exampleRequest,
+    requestId: overrides.requestId ?? `req-${Math.random().toString(36).slice(2)}`,
+    ...overrides,
+  }
 }
 
 const exampleResponse: AiComponentResponse = {
@@ -82,6 +92,8 @@ const exampleResponse: AiComponentResponse = {
 const exampleUsage = {
   input_tokens: 1234,
   output_tokens: 56,
+  cache_read_input_tokens: 5000,
+  cache_creation_input_tokens: 2000,
 }
 
 function resultEnvelope(textOrObject: unknown, usage = exampleUsage): string {
@@ -94,6 +106,17 @@ function resultEnvelope(textOrObject: unknown, usage = exampleUsage): string {
     result,
     usage,
   })
+}
+
+/**
+ * Build a synthetic `assistant` envelope. When `usage` is non-null, it lands on `message.usage`
+ * — the same shape Anthropic's Messages API returns and the CLI passes through, used here to
+ * exercise the per-hop `contextTokens` capture path in `captureAssistantContent`.
+ */
+function assistantEnvelope(text: string, usage: typeof exampleUsage | null = null): string {
+  const message: Record<string, unknown> = { content: [{ type: 'text', text }] }
+  if (usage != null) message.usage = usage
+  return JSON.stringify({ type: 'assistant', message })
 }
 /* eslint-enable camelcase */
 
@@ -183,7 +206,115 @@ describe('ClaudeAgentSession', () => {
     expect(reply.usage).not.toBeNull()
     expect(reply.usage!.inputTokens).toBe(exampleUsage.input_tokens)
     expect(reply.usage!.outputTokens).toBe(exampleUsage.output_tokens)
-    expect(reply.usage!.contextBytes).toBeGreaterThan(0)
+    expect(reply.usage!.cacheReadTokens).toBe(exampleUsage.cache_read_input_tokens)
+    expect(reply.usage!.cacheCreationTokens).toBe(exampleUsage.cache_creation_input_tokens)
+    // No `assistant` envelope was pushed in this test, so `lastHopUsage` is null and
+    // `contextTokens` falls back to the `result.usage` sum (= the prior behavior). The flag
+    // surfaces the fallback to consumers; with `hopCount == 0` it's the degenerate "no model
+    // output observed" case rather than the broken "tool turn missed final usage" case.
+    expect(reply.usage!.contextTokens).toBe(
+      exampleUsage.input_tokens +
+        exampleUsage.cache_read_input_tokens +
+        exampleUsage.cache_creation_input_tokens,
+    )
+    expect(reply.usage!.contextFromLastHop).toBe(false)
+    expect(reply.usage!.hopCount).toBe(0)
+    session.shutdown()
+  })
+
+  test('contextTokens comes from the LAST assistant envelope, not result.usage', async () => {
+    const { session, children } = buildSession()
+    await primeChild(children[0]!)
+
+    /* eslint-disable camelcase */
+    const earlyHop = {
+      input_tokens: 10,
+      output_tokens: 20,
+      cache_read_input_tokens: 1000,
+      cache_creation_input_tokens: 500,
+    }
+    const finalHop = {
+      input_tokens: 30,
+      output_tokens: 40,
+      cache_read_input_tokens: 70_000,
+      cache_creation_input_tokens: 2_000,
+    }
+    // Result usage is the cost-side roll-up (CLI sums across hops); deliberately distinct from
+    // either per-hop value so the assertions can tell them apart.
+    const resultUsage = {
+      input_tokens: 999,
+      output_tokens: 888,
+      cache_read_input_tokens: 77_777,
+      cache_creation_input_tokens: 6_666,
+    }
+    /* eslint-enable camelcase */
+
+    const replyPromise = session.runRequest(exampleRequest, fakeSender())
+    await settle()
+    children[0]!.pushStdoutLine(assistantEnvelope('thinking…', earlyHop))
+    children[0]!.pushStdoutLine(assistantEnvelope(JSON.stringify(exampleResponse), finalHop))
+    children[0]!.pushStdoutLine(resultEnvelope(exampleResponse, resultUsage))
+    const reply = await replyPromise
+
+    expect(reply.usage).not.toBeNull()
+    // Cost-side fields come from the result envelope.
+    expect(reply.usage!.inputTokens).toBe(resultUsage.input_tokens)
+    expect(reply.usage!.outputTokens).toBe(resultUsage.output_tokens)
+    expect(reply.usage!.cacheReadTokens).toBe(resultUsage.cache_read_input_tokens)
+    expect(reply.usage!.cacheCreationTokens).toBe(resultUsage.cache_creation_input_tokens)
+    // contextTokens uses the LAST assistant envelope's usage (the synthesis call's actual
+    // prompt size), not the cost-side sum.
+    expect(reply.usage!.contextTokens).toBe(
+      finalHop.input_tokens +
+        finalHop.cache_read_input_tokens +
+        finalHop.cache_creation_input_tokens,
+    )
+    expect(reply.usage!.contextFromLastHop).toBe(true)
+    expect(reply.usage!.hopCount).toBe(2)
+    session.shutdown()
+  })
+
+  test('contextFromLastHop is false when the final assistant envelope omits usage', async () => {
+    // Captures the broken case the user is concerned about: an early hop carries `usage`,
+    // but the final synthesis envelope (post-tool) omits it. We must NOT keep the stale
+    // earlier value — `lastHopUsage` is overwritten with `null` on every envelope, so the
+    // flag flips to false and consumers (the metrics writer) can refuse to record the row.
+    const { session, children } = buildSession()
+    await primeChild(children[0]!)
+
+    /* eslint-disable camelcase */
+    const earlyHop = {
+      input_tokens: 5,
+      output_tokens: 10,
+      cache_read_input_tokens: 100,
+      cache_creation_input_tokens: 0,
+    }
+    const resultUsage = {
+      input_tokens: 99,
+      output_tokens: 99,
+      cache_read_input_tokens: 9999,
+      cache_creation_input_tokens: 999,
+    }
+    /* eslint-enable camelcase */
+
+    const replyPromise = session.runRequest(exampleRequest, fakeSender())
+    await settle()
+    children[0]!.pushStdoutLine(assistantEnvelope('thinking…', earlyHop))
+    // Final envelope: no `usage` — simulates the broken case.
+    children[0]!.pushStdoutLine(assistantEnvelope(JSON.stringify(exampleResponse)))
+    children[0]!.pushStdoutLine(resultEnvelope(exampleResponse, resultUsage))
+    const reply = await replyPromise
+
+    expect(reply.usage).not.toBeNull()
+    expect(reply.usage!.contextFromLastHop).toBe(false)
+    expect(reply.usage!.hopCount).toBe(2)
+    // contextTokens fell back to the result-envelope sum (NOT `earlyHop`'s — the early hop's
+    // value would be stale and misleading).
+    expect(reply.usage!.contextTokens).toBe(
+      resultUsage.input_tokens +
+        resultUsage.cache_read_input_tokens +
+        resultUsage.cache_creation_input_tokens,
+    )
     session.shutdown()
   })
 
@@ -341,23 +472,24 @@ describe('ClaudeAgentSession', () => {
     session.shutdown()
   })
 
-  test('activeSender returns null between turns and the live sender mid-turn', async () => {
+  test('activeRequest returns null between turns and the live sender + id mid-turn', async () => {
     const { session, children } = buildSession()
     await primeChild(children[0]!)
-    expect(session.activeSender).toBeNull()
+    expect(session.activeRequest).toBeNull()
 
     const sender = fakeSender()
-    const replyPromise = session.runRequest(exampleRequest, sender)
+    const request = makeRequest()
+    const replyPromise = session.runRequest(request, sender)
     await settle()
-    expect(session.activeSender).toBe(sender)
+    expect(session.activeRequest).toEqual({ requestId: request.requestId, sender })
 
     children[0]!.pushStdoutLine(resultEnvelope(exampleResponse))
     await replyPromise
-    expect(session.activeSender).toBeNull()
+    expect(session.activeRequest).toBeNull()
     session.shutdown()
   })
 
-  test('activeSender returns null when the in-flight sender has been destroyed mid-turn', async () => {
+  test('activeRequest returns null when the in-flight sender has been destroyed mid-turn', async () => {
     const { session, children } = buildSession()
     await primeChild(children[0]!)
     let destroyed = false
@@ -366,12 +498,13 @@ describe('ClaudeAgentSession', () => {
       send: vi.fn(),
     } as unknown as Electron.WebContents
 
-    const replyPromise = session.runRequest(exampleRequest, sender)
+    const request = makeRequest()
+    const replyPromise = session.runRequest(request, sender)
     await settle()
-    expect(session.activeSender).toBe(sender)
+    expect(session.activeRequest).toEqual({ requestId: request.requestId, sender })
 
     destroyed = true
-    expect(session.activeSender).toBeNull()
+    expect(session.activeRequest).toBeNull()
 
     children[0]!.pushStdoutLine(resultEnvelope(exampleResponse))
     await replyPromise
@@ -389,5 +522,184 @@ describe('ClaudeAgentSession', () => {
     expect(reply.result.ok).toBe(false)
     if (!reply.result.ok) expect(reply.result.error.payload).toMatch(/shutting down/)
     expect(children[0]!.killCalls).toContain('SIGTERM')
+  })
+
+  test('emits ai-progress: queued + started + text on a successful turn', async () => {
+    const { session, children } = buildSession()
+    await primeChild(children[0]!)
+    const sender = fakeSender()
+    // The send mock on `sender` is the one to inspect. Cast back to access it.
+    const sendMock = (sender as unknown as { send: ReturnType<typeof vi.fn> }).send
+    const request = makeRequest({ requestId: 'req-progress' })
+    const replyPromise = session.runRequest(request, sender)
+    await settle()
+    // `queued` should fire on IPC receipt (before any awaits in the queue task), and `started`
+    // once the turn actually begins.
+    const queuedCalls = sendMock.mock.calls.filter(
+      (c) => c[0] === 'ai-progress' && c[1].kind === 'queued',
+    )
+    expect(queuedCalls).toHaveLength(1)
+    expect(queuedCalls[0]![1]).toEqual({ requestId: 'req-progress', kind: 'queued' })
+    const startedCalls = sendMock.mock.calls.filter(
+      (c) => c[0] === 'ai-progress' && c[1].kind === 'started',
+    )
+    expect(startedCalls).toHaveLength(1)
+    expect(startedCalls[0]![1]).toEqual({ requestId: 'req-progress', kind: 'started' })
+    // The two events arrive in order: `queued` before `started`.
+    const orderedKinds = sendMock.mock.calls
+      .filter((c) => c[0] === 'ai-progress')
+      .map((c) => c[1].kind)
+    const queuedIdx = orderedKinds.indexOf('queued')
+    const startedIdx = orderedKinds.indexOf('started')
+    expect(queuedIdx).toBeGreaterThanOrEqual(0)
+    expect(startedIdx).toBeGreaterThan(queuedIdx)
+
+    // Synthesize an assistant envelope with a text block — captureAssistantContent should fire
+    // a `text` progress event.
+    children[0]!.pushStdoutLine(
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Reading the table…' }] },
+      }),
+    )
+    await settle()
+    const textCalls = sendMock.mock.calls.filter(
+      (c) => c[0] === 'ai-progress' && c[1].kind === 'text',
+    )
+    expect(textCalls).toHaveLength(1)
+    expect(textCalls[0]![1]).toEqual({
+      requestId: 'req-progress',
+      kind: 'text',
+      text: 'Reading the table…',
+    })
+
+    children[0]!.pushStdoutLine(resultEnvelope(exampleResponse))
+    await replyPromise
+    session.shutdown()
+  })
+
+  test('emits ai-progress: tool with raw input for built-in and MCP tool_use blocks', async () => {
+    const { session, children } = buildSession()
+    await primeChild(children[0]!)
+    const sender = fakeSender()
+    const sendMock = (sender as unknown as { send: ReturnType<typeof vi.fn> }).send
+    const request = makeRequest({ requestId: 'req-tool' })
+    const replyPromise = session.runRequest(request, sender)
+    await settle()
+
+    /* eslint-disable camelcase -- mirrors the snake_case `file_path` key the real CLI emits. */
+    children[0]!.pushStdoutLine(
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'Read',
+              input: { file_path: '/lib/Standard/Table/0.0.0/Main.enso' },
+            },
+          ],
+        },
+      }),
+    )
+    /* eslint-enable camelcase */
+    children[0]!.pushStdoutLine(
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'mcp__enso__evaluateExpression',
+              input: { expression: 'source.column_names.to_json' },
+            },
+          ],
+        },
+      }),
+    )
+    await settle()
+    const toolCalls = sendMock.mock.calls.filter(
+      (c) => c[0] === 'ai-progress' && c[1].kind === 'tool',
+    )
+    expect(toolCalls).toHaveLength(2)
+    expect(toolCalls[0]![1]).toEqual({
+      requestId: 'req-tool',
+      kind: 'tool',
+      toolName: 'Read',
+      // eslint-disable-next-line camelcase -- the raw input is forwarded as-is, snake_case included.
+      input: { file_path: '/lib/Standard/Table/0.0.0/Main.enso' },
+    })
+    expect(toolCalls[1]![1]).toEqual({
+      requestId: 'req-tool',
+      kind: 'tool',
+      toolName: 'mcp__enso__evaluateExpression',
+      input: { expression: 'source.column_names.to_json' },
+    })
+
+    children[0]!.pushStdoutLine(resultEnvelope(exampleResponse))
+    await replyPromise
+    session.shutdown()
+  })
+
+  test('cancelTurn on the in-flight request resolves with cancellation Err and SIGINTs the child', async () => {
+    const { session, children } = buildSession()
+    await primeChild(children[0]!)
+    const sender = fakeSender()
+    const request = makeRequest({ requestId: 'req-cancel' })
+    const replyPromise = session.runRequest(request, sender)
+    await settle()
+    // Mid-turn: the renderer cancels.
+    session.cancelTurn(request.requestId)
+    const reply = await replyPromise
+    expect(reply.result.ok).toBe(false)
+    if (!reply.result.ok) expect(reply.result.error.payload).toMatch(/cancelled by user/)
+    // SIGINT should have been sent to the live child (FakeChild treats kill as terminal — the
+    // 2-second SIGTERM watchdog never fires because the child has already exited via SIGINT).
+    expect(children[0]!.killCalls[0]).toBe('SIGINT')
+    session.shutdown()
+  })
+
+  test('cancelTurn for an id that was never issued does not poison a later request reusing that id', async () => {
+    // Regression guard: previously, `cancelTurn` always added to the `cancelled` set. A cancel
+    // arriving for an id that hadn't been (or would never be) enqueued would sit there forever,
+    // and a future `runRequest` reusing the same id would short-circuit on entry. Tightened so
+    // unknown ids are dropped.
+    const { session, children } = buildSession()
+    await primeChild(children[0]!)
+    session.cancelTurn('stranger-id')
+    const reply = session.runRequest(makeRequest({ requestId: 'stranger-id' }), fakeSender())
+    await settle()
+    // Priming + the new request — the request was NOT short-circuited.
+    expect(children[0]!.stdinWrites).toHaveLength(2)
+    children[0]!.pushStdoutLine(resultEnvelope(exampleResponse))
+    const settled = await reply
+    expect(settled.result.ok).toBe(true)
+    session.shutdown()
+  })
+
+  test('cancelTurn on a queued request short-circuits without writing stdin', async () => {
+    const { session, children } = buildSession()
+    await primeChild(children[0]!)
+    const sender1 = fakeSender()
+    const sender2 = fakeSender()
+    const request1 = makeRequest({ requestId: 'req-q1' })
+    const request2 = makeRequest({ requestId: 'req-q2' })
+    const r1 = session.runRequest(request1, sender1)
+    const r2 = session.runRequest(request2, sender2)
+    await settle()
+    // Only request1 has reached `runOneTurn` so far.
+    expect(children[0]!.stdinWrites).toHaveLength(2) // priming + r1
+    // Cancel the still-queued r2 before r1 finishes.
+    session.cancelTurn(request2.requestId)
+
+    // Finish r1 normally.
+    children[0]!.pushStdoutLine(resultEnvelope(exampleResponse))
+    await r1
+    // r2 should have short-circuited without ever writing to stdin.
+    const r2Reply = await r2
+    expect(r2Reply.result.ok).toBe(false)
+    if (!r2Reply.result.ok) expect(r2Reply.result.error.payload).toMatch(/Cancelled by user/)
+    expect(children[0]!.stdinWrites).toHaveLength(2) // still just priming + r1
+    session.shutdown()
   })
 })
