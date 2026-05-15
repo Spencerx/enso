@@ -161,6 +161,10 @@ async function addFreestandingNode(page: Page, expression: string, expectedNodeC
   await page.getByTestId('add-component-button').click()
   const cbInput = page.getByTestId('component-editor-content')
   await expect(cbInput).toBeVisible()
+  // CB defaults to AI prompt mode when Claude is available (PR #15010). Shift+Enter from aiPrompt
+  // drops into component-browsing; the trailing Enter then falls through to code-edit mode (no
+  // suggestion matches the literal expression), so the typed code is parsed as code.
+  await page.keyboard.press('Shift+Enter')
   await page.keyboard.insertText(expression)
   await page.keyboard.press('Enter')
   await expect(page.locator('.GraphNode')).toHaveCount(expectedNodeCount, {
