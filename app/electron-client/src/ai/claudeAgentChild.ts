@@ -37,8 +37,17 @@ export const PRIMING_REQUEST_ID = 'priming'
  */
 export const PRIMING_TIMEOUT_MS = 600_000
 
-/** SIGINT (graceful) to SIGTERM (force respawn) escalation window during cancellation. */
-const CANCEL_SIGINT_TO_SIGTERM_MS = 2_000
+/** SIGTERM (graceful exit) to SIGKILL (force kill) escalation window during cancellation. */
+const CANCEL_SIGTERM_TO_SIGKILL_MS = 2_000
+
+/**
+ * How long to wait for the `control_response` to a `control_request`/`interrupt` envelope
+ * before we conclude the CLI either doesn't speak the control protocol or is stuck, and
+ * escalate the cancel to SIGTERM (followed by the {@link CANCEL_SIGTERM_TO_SIGKILL_MS}
+ * watchdog). Modern Claude Code (2.x+ stream-json mode) answers within milliseconds; the
+ * cushion is for older or unhealthy builds.
+ */
+const CANCEL_CONTROL_FALLBACK_MS = 1_000
 
 /** Spawn-time configuration for one `claude` child. */
 export interface ChildAgentConfig {
@@ -117,6 +126,23 @@ function userTurnLine(content: string): string {
   return JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n'
 }
 
+/**
+ * Wire format the Python/TS SDKs use to interrupt the in-flight HTTPS stream without exiting
+ * the CLI: `{"type":"control_request","request_id":"...","request":{"subtype":"interrupt"}}`.
+ * The CLI replies with a matching `control_response` and emits an `aborted_streaming` `result`
+ * envelope for the cancelled turn. Wire format verified with `/tmp/claude-interrupt-probe.mjs`.
+ */
+function interruptRequestLine(requestId: string): string {
+  return (
+    JSON.stringify({
+      type: 'control_request',
+      // eslint-disable-next-line camelcase -- mirrors the snake_case key the CLI expects.
+      request_id: requestId,
+      request: { subtype: 'interrupt' },
+    }) + '\n'
+  )
+}
+
 function parseJsonSafe(text: string): unknown {
   try {
     return JSON.parse(text)
@@ -161,9 +187,37 @@ const assistantEnvelopeSchema = z.object({
 
 const resultEnvelopeSchema = z.object({
   type: z.literal('result'),
+  subtype: z.string().optional(),
+  /* eslint-disable camelcase -- mirrors the snake_case keys the CLI emits. */
+  is_error: z.boolean().optional(),
+  terminal_reason: z.string().optional(),
+  /* eslint-enable camelcase */
   result: z.string().optional(),
   usage: tokenUsageSchema.optional(),
 })
+
+/**
+ * `control_response` is the CLI's reply to a `control_request` we wrote on stdin (used here
+ * exclusively for the `interrupt` subtype). `request_id` echoes ours; `subtype` is `success`
+ * for accepted control requests and `error` when the CLI rejected the request.
+ */
+/* eslint-disable camelcase -- mirrors snake_case keys the CLI emits. */
+const controlResponseEnvelopeSchema = z.object({
+  type: z.literal('control_response'),
+  response: z.object({
+    subtype: z.enum(['success', 'error']),
+    request_id: z.string(),
+    error: z.string().optional(),
+  }),
+})
+/* eslint-enable camelcase */
+
+/** Every envelope type the parser dispatches on. */
+const stdoutEnvelopeSchema = z.discriminatedUnion('type', [
+  assistantEnvelopeSchema,
+  controlResponseEnvelopeSchema,
+  resultEnvelopeSchema,
+])
 
 /** Token-usage shape the CLI surfaces on every assistant/result envelope. */
 export type RawTokenUsage = z.infer<typeof tokenUsageSchema>
@@ -230,6 +284,27 @@ export class ChildAgent {
    */
   private readonly sandboxCwd: string
   private isReadyResolved = false
+  /**
+   * Set inside {@link escalateSignalCancel} when the in-band `control_request`/`interrupt`
+   * fallback escalates to SIGTERM. Tells {@link onUnexpectedExit} that the upcoming exit is one
+   * we triggered ourselves, that the ready deferred has already been pre-swapped, and that no
+   * further reject/swap is needed. Cleared on the next `onUnexpectedExit` or on `shutdown()`.
+   * Stays `false` for the common path (CLI honored the control envelope, child stayed alive).
+   */
+  private cancelInProgress = false
+  /**
+   * Correlation id for the most recent `control_request`/`interrupt` envelope we wrote to
+   * stdin. Used to (a) match the CLI's `control_response` so we can clear the fallback timer
+   * and (b) detect rejection so we can escalate to SIGTERM. `null` between cancels.
+   */
+  private pendingInterruptId: string | null = null
+  /**
+   * Fallback timer armed alongside the `control_request`/`interrupt` envelope. Fires if no
+   * `control_response` arrives within {@link CANCEL_CONTROL_FALLBACK_MS}, escalating to SIGTERM.
+   */
+  private cancelFallbackTimer: ReturnType<typeof setTimeout> | null = null
+  /** SIGTERM→SIGKILL escalation timer armed by {@link escalateSignalCancel}. */
+  private cancelSigkillTimer: ReturnType<typeof setTimeout> | null = null
 
   /** Spawn the child eagerly and kick off the priming turn in the background. */
   constructor(config: ChildAgentConfig) {
@@ -399,8 +474,11 @@ export class ChildAgent {
 
   /**
    * Cancel the in-flight turn whose id matches. Resolves the originating turn synchronously
-   * with a cancellation `Err` and signals the child (SIGINT, with a 2-second SIGTERM
-   * watchdog if SIGINT is ignored). Returns `true` iff cancellation took effect.
+   * with a cancellation `Err` and writes a `control_request`/`interrupt` envelope to stdin —
+   * the SDK-shaped in-band cancel that aborts the HTTPS stream without exiting the child, so
+   * the next turn reuses the same primed context. If no `control_response` lands within
+   * {@link CANCEL_CONTROL_FALLBACK_MS} we escalate to SIGTERM (and SIGKILL-after-2s). Returns
+   * `true` iff cancellation took effect.
    */
   cancelInFlight(requestId: string): boolean {
     const pending = this.pending
@@ -420,6 +498,9 @@ export class ChildAgent {
   shutdown(): void {
     if (this.disposed) return
     this.disposed = true
+    this.pendingInterruptId = null
+    this.clearCancelFallbackTimer()
+    this.clearCancelSigkillTimer()
     if (this.pending) {
       const pending = this.pending
       this.pending = null
@@ -466,6 +547,9 @@ export class ChildAgent {
   private onChildStarted(handle: ChildProcessHandle): void {
     this.stderrTail = ''
     this.pending = null
+    this.pendingInterruptId = null
+    this.clearCancelFallbackTimer()
+    this.clearCancelSigkillTimer()
 
     const child = handle.child
     if (child.stdout) {
@@ -498,6 +582,26 @@ export class ChildAgent {
         errorReason: reason,
       })
     }
+    const wasCancelInitiated = this.cancelInProgress
+    this.cancelInProgress = false
+
+    if (wasCancelInitiated) {
+      // {@link cancelInFlight} has already pre-swapped `readyDeferred` to a fresh pending one,
+      // so the next task awaits the upcoming auto-respawn's prime rather than racing past a
+      // resolved-from-first-prime OLD deferred. Skip the reject + swap that the
+      // not-cancel-initiated branch does — the OLD deferred is unreferenced and the fresh one
+      // is the right thing to leave pending. On a crash-loop guard trip we still need to
+      // reject (auto-respawn won't fire, so the fresh deferred would hang otherwise).
+      if (info.exceedsCrashLimit) {
+        this.readyDeferred.reject(info.exitError ?? new Error(reason))
+        this.isReadyResolved = false
+        console.warn(
+          `[AI${labelTag}] claude crash-loop guard tripped (${MAX_RESPAWNS_IN_WINDOW} crashes within ${RESPAWN_WINDOW_MS}ms); auto-respawn is suspended until the next request.`,
+        )
+      }
+      return
+    }
+
     // Reject the priming promise so any task awaiting `ready` fails fast. Prefer the original
     // error object (when 'error' fired on the child, e.g. ENOENT) so the consumer can surface
     // the install hint via `.code` instead of parsing the reason string.
@@ -532,18 +636,21 @@ export class ChildAgent {
   }
 
   private onStdoutLine(line: string): void {
-    const envelope = parseJsonSafe(line)
-    if (envelope == null) return
-    const assistant = assistantEnvelopeSchema.safeParse(envelope)
-    if (assistant.success) {
-      this.captureAssistantContent(assistant.data)
-      return
+    const json = parseJsonSafe(line)
+    if (json == null) return
+    const parsed = stdoutEnvelopeSchema.safeParse(json)
+    if (!parsed.success) return
+    switch (parsed.data.type) {
+      case 'assistant':
+        this.captureAssistantContent(parsed.data)
+        return
+      case 'control_response':
+        this.handleControlResponse(parsed.data)
+        return
+      case 'result':
+        this.resolveTerminal(parsed.data)
+        return
     }
-    const result = resultEnvelopeSchema.safeParse(envelope)
-    if (result.success) {
-      this.resolveTerminal(result.data)
-    }
-    // Other envelope types (system init, user echo, rate_limit_event, unknown): ignore.
   }
 
   private captureAssistantContent(env: z.infer<typeof assistantEnvelopeSchema>): void {
@@ -590,6 +697,10 @@ export class ChildAgent {
   }
 
   private resolveTerminal(env: z.infer<typeof resultEnvelopeSchema>): void {
+    // The aborted result envelope from a previously-cancelled turn arrives on the same stream
+    // as subsequent turns' results. The originating `runTurn` was already resolved synchronously
+    // inside {@link cancelInFlight}, so drop these.
+    if (env.is_error === true && env.terminal_reason === 'aborted_streaming') return
     if (!this.pending) return
     const pending = this.pending
     this.pending = null
@@ -606,25 +717,99 @@ export class ChildAgent {
     this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL_CHARS)
   }
 
-  /** SIGINT then SIGTERM-after-2s; best-effort, since the cancellation Err already landed. */
+  /**
+   * In-band cancel: write a `control_request`/`interrupt` envelope to stdin, arm a fallback
+   * timer that escalates to SIGTERM if the CLI doesn't reply within
+   * {@link CANCEL_CONTROL_FALLBACK_MS}. The escalation path also covers a missing handle and
+   * a destroyed/closed stdin.
+   */
   private signalCancel(): void {
     const handle = this.watcher.current
     if (handle == null || !handle.alive) return
+    const child = handle.child
+    if (!child.stdin || child.stdin.destroyed) {
+      this.escalateSignalCancel(handle)
+      return
+    }
+    const interruptId = `req_${Math.random().toString(36).slice(2, 10)}`
+    this.pendingInterruptId = interruptId
     try {
-      handle.child.kill('SIGINT')
+      child.stdin.write(interruptRequestLine(interruptId))
+    } catch {
+      this.pendingInterruptId = null
+      this.escalateSignalCancel(handle)
+      return
+    }
+    this.clearCancelFallbackTimer()
+    this.cancelFallbackTimer = setTimeout(() => {
+      this.cancelFallbackTimer = null
+      if (this.pendingInterruptId !== interruptId) return
+      this.pendingInterruptId = null
+      const labelTag = this.config.logLabel ? `:${this.config.logLabel}` : ''
+      console.warn(
+        `[AI${labelTag}] no control_response within ${CANCEL_CONTROL_FALLBACK_MS}ms; escalating to SIGTERM`,
+      )
+      const stillCurrent = this.watcher.current
+      if (stillCurrent != null && stillCurrent.alive) {
+        this.escalateSignalCancel(stillCurrent)
+      }
+    }, CANCEL_CONTROL_FALLBACK_MS)
+  }
+
+  /**
+   * Fallback ladder used when the CLI rejects (or ignores) the in-band interrupt. SIGTERM
+   * now, SIGKILL after {@link CANCEL_SIGTERM_TO_SIGKILL_MS}.
+   */
+  private escalateSignalCancel(handle: ChildProcessHandle): void {
+    this.pendingInterruptId = null
+    this.clearCancelFallbackTimer()
+    this.cancelInProgress = true
+    this.swapInReadyDeferred()
+    try {
+      handle.child.kill('SIGTERM')
     } catch {
       // ignore — already exiting
     }
-    setTimeout(() => {
+    this.clearCancelSigkillTimer()
+    this.cancelSigkillTimer = setTimeout(() => {
+      this.cancelSigkillTimer = null
       const stillAliveHandle = this.watcher.current
       if (stillAliveHandle == null || !stillAliveHandle.alive) return
       if (stillAliveHandle !== handle) return
       try {
-        stillAliveHandle.child.kill('SIGTERM')
+        stillAliveHandle.child.kill('SIGKILL')
       } catch {
         // ignore
       }
-    }, CANCEL_SIGINT_TO_SIGTERM_MS)
+    }, CANCEL_SIGTERM_TO_SIGKILL_MS)
+  }
+
+  private handleControlResponse(env: z.infer<typeof controlResponseEnvelopeSchema>): void {
+    const interruptId = this.pendingInterruptId
+    if (interruptId == null || env.response.request_id !== interruptId) return
+    this.pendingInterruptId = null
+    this.clearCancelFallbackTimer()
+    if (env.response.subtype === 'error') {
+      const handle = this.watcher.current
+      if (handle == null || !handle.alive) return
+      const labelTag = this.config.logLabel ? `:${this.config.logLabel}` : ''
+      console.warn(
+        `[AI${labelTag}] interrupt control_request rejected (${env.response.error ?? 'no detail'}); escalating to SIGTERM`,
+      )
+      this.escalateSignalCancel(handle)
+    }
+  }
+
+  private clearCancelFallbackTimer(): void {
+    if (this.cancelFallbackTimer == null) return
+    clearTimeout(this.cancelFallbackTimer)
+    this.cancelFallbackTimer = null
+  }
+
+  private clearCancelSigkillTimer(): void {
+    if (this.cancelSigkillTimer == null) return
+    clearTimeout(this.cancelSigkillTimer)
+    this.cancelSigkillTimer = null
   }
 }
 

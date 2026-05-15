@@ -2,6 +2,12 @@
 
 #### Enso IDE
 
+- Fix AI prompt cancellation leaving the queue wedged. Cancelling an in-flight
+  prompt could leave the next prompt failing with `stdin write failed`, and any
+  subsequent prompt stuck on "waiting"; the cancel path now pre-swaps the
+  child's readiness deferred so follow-up prompts synchronize on the respawned
+  `claude` child instead of racing past a stale `ready` and writing into a dying
+  stdin.
 - AI mode in the Component Browser is now a first-class option, with a three-way
   mode switch (robot / search / code) accessible by clicking the icon next to
   the Component Browser input. The mode defaults to AI when the local `claude`

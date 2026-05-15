@@ -346,17 +346,53 @@ Findings from the probe at the time the long-lived design landed:
 - **Cancellation:** `Channel.cancelAiComponent` carries the renderer's
   `requestId`. On match against the pending slot, the session nulls pending
   synchronously, resolves the originating turn with
-  `Err('Claude agent: cancelled by user')`, and sends SIGINT to the child to
-  abort the in-flight HTTPS stream to Anthropic. A 2-second watchdog escalates
-  to SIGTERM if the CLI ignores SIGINT in `-p stream-json` mode (the watcher
-  then sees the child exit and auto-respawns — the warm context is lost, but the
-  user got a fast cancel). For a queued request that hasn't reached `runOneTurn`
-  yet, the id is filed in a `cancelled` set; the queue task consumes it on entry
-  and short-circuits without any signal needed. SIGINT behavior in stream-json
-  mode is not officially documented; if the CLI exits on SIGINT, the watcher
-  just respawns. We did NOT add an "in-stdin cancel message" path: the CLI is
-  turn-based, so a cancel line submitted mid-turn queues for AFTER the current
-  turn finishes, by which point the tokens are already spent.
+  `Err('Claude agent: cancelled by user')`, and writes an SDK-shaped
+  `control_request`/`interrupt` envelope to the child's stdin
+  (`{"type":"control_request","request_id":"req_…","request":{"subtype":"interrupt"}}`).
+  Modern Claude Code (2.x+ stream-json mode) replies with `control_response`
+  `subtype: success` within milliseconds and emits an
+  `aborted_streaming`/`is_error: true` `result` envelope for the cancelled turn
+  — **without exiting the child**, so the next turn reuses the same primed
+  conversation context. Wire format and timing confirmed via
+  `/tmp/claude-interrupt-probe.mjs` (interrupt→result was 3 ms; the follow-up
+  trivial turn completed on the same primed child with no re-prime). For a
+  queued request that hasn't reached `runOneTurn` yet, the id is filed in a
+  `cancelled` set; the queue task consumes it on entry and short-circuits
+  without any envelope written.
+
+  **Fallback ladder.** If no `control_response` arrives within
+  `CANCEL_CONTROL_FALLBACK_MS` (1000 ms), or if the CLI replies
+  `subtype: error`, `escalateSignalCancel` takes over: SIGTERM now, SIGKILL
+  after `CANCEL_SIGTERM_TO_SIGKILL_MS` (2000 ms) if the child is still alive.
+  SIGINT is intentionally skipped — once we've decided to escalate, the goal is
+  a guaranteed exit so the watcher can respawn; SIGTERM is the polite shutdown
+  (the child exits in ~220 ms with code 143 — see the stream-json wire-format
+  section), and SIGKILL is the hammer for the rare case SIGTERM is ignored. The
+  escalation path also pre-swaps `readyDeferred` and arms the `cancelInProgress`
+  flag (since the child _does_ exit on this path) so the next queue task's
+  `await primary.ready` synchronizes on the upcoming respawn's prime instead of
+  racing past a stale resolved deferred. `onUnexpectedExit` honors the flag and
+  leaves the new pending deferred alone (the auto-respawn's `onChildStarted` →
+  `prime` resolves it). The common path doesn't touch `readyDeferred` — the
+  child stays alive and primed.
+
+  **Aborted-result filter.** After a successful interrupt the CLI emits a
+  `result` envelope with `is_error: true` and
+  `terminal_reason: aborted_streaming` on the same stdout stream as future
+  turns' results. `resolveTerminal` drops these explicitly so a late-arriving
+  aborted envelope can't tear down the next turn's pending state.
+
+  Regression tests live in `tests/headless/claudeAgentChild.test.ts`
+  (`cancelInFlight writes a control_request interrupt envelope …`,
+  `cancelInFlight: control_response success keeps the child usable …`,
+  `cancelInFlight: no control_response within the fallback window escalates to SIGTERM`,
+  `cancelInFlight: control_response error escalates to SIGTERM immediately`) and
+  `tests/headless/claudeAgent.test.ts`
+  (`cancelTurn on the in-flight request resolves with cancellation Err and writes a control_request`,
+  `a queued request submitted right after a cancel runs on the SAME child …`);
+  end-to-end behaviour is in `tests/aiNode.spec.ts`
+  (`cancelling a running AI prompt leaves the queue healthy …`).
+
 - **Crash recovery:** an unexpected child exit fails any in-flight request with
   a structured `Err(...)`, then auto-respawns and re-primes. A crash-loop guard
   suspends auto-respawn after 3 unexpected exits within 30 seconds; the next IPC
