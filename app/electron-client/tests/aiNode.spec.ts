@@ -29,6 +29,8 @@ import {
   visualizeData,
 } from './electronTest'
 
+const AI_PROMPT_MAX_MS = 600_000
+
 // Force a context-rotation during the test. Defaults (300K soft / 400K hard) won't fire on
 // a 3-prompt session, so we set thresholds well below what a single primed turn produces:
 // every real prompt then crosses soft, the warming child primes during the next turn or two,
@@ -65,10 +67,11 @@ test.skip(
 test.use({ aiEnabled: true })
 
 test('creates three AI nodes plus two manual nodes in one session', async ({ page }) => {
-  // Three AI prompts × up to ~120s each plus setup, manual nodes, and visualizations easily
-  // outruns the playwright config's 180s default. Budget 15 min so a single slow AI turn can
-  // cover its worst case without prematurely killing the test.
-  test.setTimeout(15 * 60_000)
+  // Each AI prompt runs under an idle-based timeout (5 min of channel silence, see
+  // `IDLE_TIMEOUT_MS`); 10 min wall clock per prompt is the per-test ceiling. The main-process
+  // timeout is the only stall-detection signal — a turn that goes silent for 5 min surfaces as
+  // a renderer-side error, which fails this assertion well before the per-test budget.
+  test.setTimeout(45 * 60_000)
   // Capture renderer-side `Tool called …` lines so the dummy-text step at the end can prove the
   // `useAiToolHandler` subscription is alive after the CB has closed (regression guard for the
   // bug where the handler was scoped to ComponentBrowser and unsubscribed on submit).
@@ -94,7 +97,7 @@ test('creates three AI nodes plus two manual nodes in one session', async ({ pag
   await expect(cbInput).toBeVisible()
   await page.keyboard.type(FIRST_AI_PROMPT)
   await page.keyboard.press('Enter')
-  await expect(graphNodes).toHaveCount(2, { timeout: 120_000 })
+  await expect(graphNodes).toHaveCount(2, { timeout: AI_PROMPT_MAX_MS })
 
   // 3) Visualize the first AI node and confirm the deterministic count.
   await graphNodes.nth(1).click()
@@ -120,7 +123,7 @@ test('creates three AI nodes plus two manual nodes in one session', async ({ pag
   await expect(cbInput).toBeVisible()
   await page.keyboard.type(SECOND_AI_PROMPT)
   await page.keyboard.press('Enter')
-  await expect(graphNodes).toHaveCount(4, { timeout: 120_000 })
+  await expect(graphNodes).toHaveCount(4, { timeout: AI_PROMPT_MAX_MS })
 
   // 6) Visualize the cross-join node.
   await graphNodes.nth(3).click()
@@ -152,7 +155,7 @@ test('creates three AI nodes plus two manual nodes in one session', async ({ pag
   await expect(cbInput).toBeVisible()
   await page.keyboard.type(PARSE_PROMPT)
   await page.keyboard.press('Enter')
-  await expect(graphNodes).toHaveCount(6, { timeout: 240_000 })
+  await expect(graphNodes).toHaveCount(6, { timeout: AI_PROMPT_MAX_MS })
 
   // The agent could only have produced a working parser by inspecting a sample value. The
   // renderer logs `[AI tool] called [#…]` for every dispatch from the MCP server (see

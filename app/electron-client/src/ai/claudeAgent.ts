@@ -31,10 +31,16 @@ import { buildUserPrompt } from './prompts.js'
 
 export type { ActiveRequest } from './claudeAgentChild.js'
 
-// Tool round-trips (filesystem reads, MCP `evaluateExpression` calls) eat the budget fast — a
-// single turn can do half a dozen sub-second LS queries on top of the model's own output. The
-// pre-tools value was 120s; tripled with headroom for the worst-case fan-out.
-const REQUEST_TIMEOUT_MS = 360_000
+// Inactivity cap: the timer resets on every `assistant` envelope (text narration or tool_use
+// block), so a turn that keeps narrating / firing tool calls runs as long as it needs to. The
+// budget fires only when the channel stays silent for the full window — meaning the model is
+// genuinely stuck. 5 min is sized to tolerate worst-case deep-thinking phases of high-effort
+// model configurations (e.g. `--effort max`), where a single thinking block can run for several
+// minutes without surfacing any stream-json envelope (the underlying API doesn't ship per-token
+// thinking deltas on this auth path, so the channel goes silent for the whole thinking phase).
+// Asking the model to "narrate more often" doesn't help — the model can't emit text mid-thinking
+// — so the only correct knob is to widen the runtime tolerance.
+const IDLE_TIMEOUT_MS = 300_000
 
 /**
  * Default soft threshold (tokens). Above this, a fresh `claude` child starts priming in the
@@ -329,7 +335,7 @@ export class ClaudeAgentSession {
           }
           const turn = await this.primary.runTurn(
             buildUserPrompt(request),
-            REQUEST_TIMEOUT_MS,
+            IDLE_TIMEOUT_MS,
             sender,
             request.requestId,
           )

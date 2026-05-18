@@ -59,6 +59,15 @@ enso> corepack pnpm -r --filter enso ide-integration-test tests/gettingStarted.s
 
 Two AI-driven specs are gated on env vars and skipped silently otherwise.
 
+Per-prompt budgets are generous (10 min for `aiNode.spec.ts`, 15 min for
+`aiChallengePrep.spec.ts`) because deep-thinking turns on `--effort max` can
+genuinely run for several minutes of channel silence (the underlying API does
+not surface per-token thinking deltas). Stall detection lives in the main
+process: `IDLE_TIMEOUT_MS` (5 min) errors out a turn whose stream-json channel
+falls silent for that long, which fails the assertion well before the per-prompt
+budget. There is no test-side feedback watchdog — the prompt-failure signal is
+enough.
+
 ### `aiNode.spec.ts` — quick smoke (~1 min)
 
 Requires the `claude` CLI on `PATH` and authenticated. Set `ENSO_TEST_AI=1`.

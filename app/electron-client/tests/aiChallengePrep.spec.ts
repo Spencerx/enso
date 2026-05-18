@@ -55,7 +55,10 @@ import {
 
 const DATASETS_DIR = process.env.ENSO_TEST_AI_CHALLENGES_DIR
 const METRICS_DIR = process.env.ENSO_AI_CHALLENGES_METRICS_DIR
-const AI_PROMPT_TIMEOUT_MS = 240_000
+// 15-min per-prompt ceiling. Stall detection lives in the main process: a turn whose stream-json
+// channel falls silent for `IDLE_TIMEOUT_MS` (5 min) errors out and fails this assertion well
+// before the per-prompt budget.
+const AI_PROMPT_TIMEOUT_MS = 900_000
 const MANUAL_NODE_TIMEOUT_MS = 30_000
 
 // `app/electron-client/tests/aiChallengePrep.spec.ts` → repo root is three `..` up, matching
@@ -222,10 +225,9 @@ async function runAIPromptOnLastNode(page: Page, prompt: string, expectedNodeCou
 test("Preppin' Data week 32 — Pokemon Card Organising (stdlib-read isolation)", async ({
   page,
 }, testInfo) => {
-  // 9 AI calls × up to 240s each, plus 4 manual source nodes and the final visualization. The
-  // 3-minute playwright default is far too short; budget 45 min so a hang fails fast without
-  // squeezing the worst-case happy path.
-  test.setTimeout(45 * 60_000)
+  // 9 AI calls × up to 15 min each upper bound, plus 4 manual source nodes and the final
+  // visualization.
+  test.setTimeout(120 * 60_000)
   const files = await resolveDataFiles(WEEK_32_FILES)
   const usage = collectAiUsage(page)
   // Track the outcome explicitly so the `finally` records pass/fail regardless of which
@@ -315,8 +317,9 @@ test("Preppin' Data week 32 — Pokemon Card Organising (stdlib-read isolation)"
 test("Preppin' Data week 51 — Strictly Positive Improvements (value-probe isolation)", async ({
   page,
 }, testInfo) => {
-  // 6 AI calls × up to 240s each, plus the manual source node and the final visualization.
-  test.setTimeout(30 * 60_000)
+  // 6 AI calls × up to 15 min each upper bound, plus the manual source node and the final
+  // visualization.
+  test.setTimeout(90 * 60_000)
   const files = await resolveDataFiles(WEEK_51_FILES)
   const usage = collectAiUsage(page)
   let passed = false
